@@ -1,0 +1,1234 @@
+---
+title: "EOAD.RNAseq.Kimma.nVenn.WGCNA.Analysis"
+date: "09/04/23"
+output: html_document
+---
+
+#RNAseq analysis using Kimma, nVenn and WGCNA
+#Valdes et al., 2023 Molecular Brain Submission
+
+#Install packages
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(version = "3.16")
+BiocManager::install("biomaRt") 
+BiocManager::install("tximport")
+install.packages("dplyr")
+BiocManager::install("DESeq2")
+BiocManager::install("stats")
+BiocManager::install("EnhancedVolcano")
+BiocManager::install('pheatmap')
+BiocManager::install("sva")
+BiocManager::install("ggfortify")
+BiocManager::install("data.table")
+BiocManager::install("tidyverse")
+BiocManager::install("edgeR")
+BiocManager::install("pheatmap")
+BiocManager::install("ggfortify")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("RColorBrewer")
+BiocManager::install("ggplot2")
+BiocManager::install("statmod")
+BiocManager::install("sva")
+BiocManager::install("rrcov")
+BiocManager::install("Glimma")
+BiocManager::install("ComplexHeatmap")
+install.packages("devtools")
+BiocManager::install("autoGO")
+BiocManager::install("Rcpp")
+BiocManager::install("xml2")
+devtools::install_github("wjawaid/enrichR")
+
+#Kimma packages
+#Skipping 4 packages not available: SEARchways, RNAetc, kimma, BIGpicture
+install.packages("remotes")
+remotes::install_github("BIGslu/SEARchways") #make sure to update packages beforehand
+remotes::install_github("BIGslu/RNAetc")
+#ERROR: this R is version 4.1.3, package 'kimma' requires R >= 4.2
+remotes::install_github("BIGslu/kimma")
+remotes::install_github("BIGslu/BIGpicture")
+remotes::install_github("BIGslu/BIGverse")
+
+#DREAM packages
+BiocManager::install("variancePartition")
+#Source: https://github.com/cran/nVennR
+#Install the nVennR package
+devtools::install_github("vqf/nVennR")
+install.packages("nVennR")
+
+#Network packages
+install.packages("WGCNA")
+BiocManager::install("patchwork")
+# The following initializes usage of Bioc devel
+#BiocManager::install(version='devel')
+BiocManager::install("STRINGdb")
+
+```
+
+#Load the following packages already installed using RStudio
+```{r}
+library(BiocManager) 
+library(biomaRt)
+library(tximport)
+library(dplyr)
+library(data.table)
+library(DESeq2) 
+library(stats)
+library(tidyverse) 
+library(EnhancedVolcano) 
+library(pheatmap) 
+library(sva) 
+library(limma) 
+library(ggfortify) 
+library(org.Hs.eg.db)
+library(RColorBrewer)
+library(gplots)
+library(statmod)
+library(sva)
+library(rrcov)
+library(Glimma)
+library(ComplexHeatmap)
+library(enrichR) 
+#Kimma packages
+library(remotes)
+library(SEARchways)
+library(RNAetc)
+library(kimma)
+library(BIGpicture)
+library(BIGverse)
+#DREAM packages
+library(variancePartition)
+library(edgeR)
+library(BiocParallel)
+library(nVennR)
+#Module network packages
+library(WGCNA)
+library(patchwork)
+library(STRINGdb)
+```
+
+#######################
+#Load the .RData File
+#######################
+
+```{r}
+#Most recent .RData file prior to manuscript submission
+load('~/Limma-Voom_Chen_EOAD_NDC_Counts_24samples_NeuronProportions.RData')
+```
+
+
+###########################################
+(Part 1 - Chen Control + EOAD samples)
+###########################################
+
+##################################################
+#Ensembl Transcript to Gene ID's Conversion
+##################################################
+
+```{r}
+#--------------------------------------------------------------------------------------------------------
+# Get the transcript to Gene IDs for Ensembl
+# Use bioMart - make sure the host matches the version you use, which here is GRCh38.104
+#useMart enables connection to a specified BioMart database
+
+#Ensembl version 104
+martGRCh38.104 = biomaRt::useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+                                  dataset = "hsapiens_gene_ensembl",
+                                  host = 'may2021.archive.ensembl.org',
+                                  path="/biomart/martservice") 
+
+#getBM is the main biomaRt query function and this usually retrieves the user's specified attributes
+#from the BioMart database
+GRCh38.104t2g = biomaRt::getBM(attributes = c("ensembl_transcript_id_version",
+                                              "ensembl_gene_id"), mart = martGRCh38.104)
+
+#dplyr::rename function is used to rename columns
+GRCh38.104t2g = dplyr::rename(GRCh38.104t2g, 
+                              TXNAME = ensembl_transcript_id_version, 
+                              ENSEMBL = ensembl_gene_id)
+head(GRCh38.104t2g)
+```
+
+
+############################################################
+#Accessing Files Needed in Base Directory
+############################################################
+
+```{r}
+#--------------------------------------------------------------------------------------------------------
+# Set the base directory containing your files - you must rename this!
+# RNA-seq analysis done by Phoebe Valdes for Goldstein samples
+base_dir <- "~/KallistoOut_Combined" 
+
+#Get samples for reduced model
+samples <- read.table(file.path(base_dir, "novaseq_Chen_RNASamples.txt"), header = TRUE, stringsAsFactors=TRUE)
+
+#For Kallisto, describe the path to find the quant.sf files
+files <- file.path(base_dir, samples$run_sample, "abundance.h5")
+
+#Apply the sample names to "files"
+names(files) <- paste0(c(samples$run_sample))
+
+# Check if all files exist
+all(file.exists(files))
+```
+
+############################################################
+#Import Counts Using Tximport 
+############################################################
+
+```{r}
+#--------------------------------------------------------------------------------------------------------
+#Import the abundance/counts measurements using tximport for Goldstein control, Chen EOAD + Control samples
+
+#Source: https://bioconductor.org/packages/devel/bioc/vignettes/tximport/inst/doc/tximport.html#:~:text=Typically%2C%20abundance%20is%20provided%20by,contains%20the%20effective%20gene%20lengths.
+#tximport package has a single function for importing transcript-level estimates.
+#Generate counts from abundances, using the argument countsFromAbundance, scaled to library size, "scaledTPM", or additionally scaled using the average transcript length, averaged over samples and to library size, "lengthScaledTPM".
+txi_lsTPM = tximport(files, 
+                     type = "kallisto", 
+                     tx2gene = GRCh38.104t2g, 
+                     countsFromAbundance = "lengthScaledTPM")
+
+#1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
+#summarizing abundance
+#summarizing counts
+#summarizing length
+#summarizing inferential replicates
+
+#Save RData file in TSCC 
+save.image('~/Tximport_Chen_RNASamples.RData')
+```
+
+##########################
+#Load the imported counts
+##########################
+
+```{r}
+#Loading RData 
+load('~/Tximport_Chen_RNASamples.RData')
+```
+
+```{r}
+# Check the head of txi_lsTPM (TPM = transcripts per million)
+head(txi_lsTPM$counts)
+names(txi_lsTPM)
+
+#66015 genes x 24 samples
+dim(txi_lsTPM$counts)
+```
+
+
+###############################################################
+#Limma-Voom Differential Expression for all EOAD vs. all NDC
+###############################################################
+
+```{r}
+## PERFORM DIFFERENTIAL EXPRESSION WITH LIMMA-VOOM ##
+# Convert counts to DGEList 
+y_unfiltered <- DGEList(txi_lsTPM$counts,
+             lib.size = colSums(txi_lsTPM$counts),
+             norm.factors = calcNormFactors(txi_lsTPM$counts),
+             samples = samples$sample,
+             group = samples$condition)
+```
+
+```{r}
+#Unloading dplyr package before using the select() method
+detach("package:dplyr", unload=TRUE)
+
+#Create a Homo Sapiens annotation from the org.Hs.eg.db database 
+Hs_ann = select(org.Hs.eg.db,
+                keys=rownames(y_unfiltered$counts),
+                columns=c("ENTREZID","SYMBOL"),
+                keytype="ENSEMBL",
+                multiVals="first")
+
+# Remove duplicated terms
+Hs_ann <- Hs_ann[!duplicated(Hs_ann[,1]),]
+head(Hs_ann)
+
+#66015 genes by 3 columns
+dim(Hs_ann)
+
+#Apply the annotation to your limma object "y"
+#Match gene symbols to Ensembl IDs
+#this might not work for CERNO
+y_unfiltered$genes <- Hs_ann
+
+# View the library size for each sample
+y_unfiltered$samples
+
+#Number of genes (66015 24)
+dim(y_unfiltered)
+```
+
+
+###############################################
+#Filtering lowly expressed genes 
+###############################################
+
+```{r}
+# Filtering lowly expressed genes (method #1)
+# This function is used in tximport manual to remove lowly expressed genes
+keep = filterByExpr(y_unfiltered) 
+
+y_filtered <- y_unfiltered[keep,]
+y_filtered <- DGEList(y_filtered)
+
+#Number of genes left after filtering (21546 24)
+dim(y_filtered)
+
+# Calculating normalization factors (method #1)
+y_filtered <- calcNormFactors(y_filtered, method = "TMM") #21546 genes x 24 samples
+
+#Add genes to the 'y_filtered' object
+y_filtered$genes <- Hs_ann
+
+#Add samples to the 'y_filtered' object
+y_filtered$samples
+
+#21546 genes x 24 samples
+dim(y_filtered)
+
+#Create new human annotation for filtered genes (number of genes - 21546 3)
+Hs_ann <- AnnotationDbi::select(org.Hs.eg.db,
+                                keys=rownames(y_filtered$counts),
+                                columns=c("ENTREZID","SYMBOL"),
+                                keytype="ENSEMBL",
+                                multiVals="first")
+
+# Remove duplicated terms (21546 3)
+Hs_ann <- Hs_ann[!duplicated(Hs_ann[,1]),]
+head(Hs_ann)
+
+#21546 genes by 3 samples
+dim(Hs_ann)
+
+#Add genes to the 'y' object
+y_filtered$genes <- Hs_ann
+```
+
+###########################################
+#Get ensemblID's and genes as a reference
+###########################################
+
+```{r}
+reference.Ensembl.Gene_Table <- data.table(y_filtered$genes)
+
+write.csv(reference.Ensembl.Gene_Table, '~/Ensembl_Gene_Table/reference.Ensembl.Gene_Table.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+##########################################
+#Calculate the density for Filtered data 
+##########################################
+
+```{r}
+#Plot the density of filtered gene expression for all samples within groups (method #1)
+filteredExpr <- cpm(y_filtered, log=T)
+```
+
+#Load the metadata
+```{r}
+#Create a sample table with the list of conditions replicates and clone #'s
+#Make excel file and export here (.csv file without MCI patients)
+sampleTable <- data.frame(read.csv('~/Metadata/sampleTable2_24samples.csv'))
+
+#Move the first column as an index column
+sampleTable <- data.frame(sampleTable[,-1], row.names = sampleTable[,1])
+```
+
+
+###################################################################
+#DEG Analysis by Kimma (all EOAD vs. all NDC clones) using Random 
+effects (ptID),  Covariates and Pairwise Contrast with Voom Weights
+###################################################################
+
+```{r}
+#Run linear model in kimma using kmFit with covariates, random effects and  pairwise contrast (all EOAD vs. all NDC)
+#Random effects are added to the model with + (1|block) where the block is the variable you want to pair samples by. Thus, we now run a mixed effects model lme in kimma 
+kimma_fit2 <- kmFit(dat = kimma.voom, model = "~ condition + sex + seq.batch + (1|ptID)", patientID = "ptID", libraryID = "libID", counts = "E", genes = "genes", weights = "weights", p_method = "BH", run.lme = TRUE, use_weights = TRUE, metrics = TRUE, run.contrast = TRUE, contrast.var = "condition")
+```
+
+#Summarize gene that are significant for condition, seq.batch and sex with the random effect (ptID) using kimma
+```{r}
+summarize_kmFit(fdr = kimma_fit2$lme.contrast)
+```
+
+#Get differential results 
+```{r}
+#Get significant results of hypothesis test
+#Filter for adj. pval < 0.05
+kimma_fit.filtered2 <- kimma_fit2$lme.contrast %>%
+  dplyr::filter(FDR < 0.05)
+
+write.csv(kimma_fit.filtered2, '~/EOADvs.NDC_filtered_lmeContrast_voomWeights_24samples_NEW.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#Get all results 
+```{r}
+#Get all results from the hypothesis test
+kimma_fit2_allResults <- kimma_fit2$lme.contrast 
+
+write.csv(kimma_fit2_allResults, '~/EOADvs.NDC_lmeContrast_voomWeights_24samples_NEW.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#Plot Venn diagram for kimma results
+```{r}
+plot_venn_genes(model_result = list("kimma contrast" = kimma_fit2$lme.contrast), 
+                fdr.cutoff = 0.05,
+                contrasts = c(
+                  # EOAD vs. NDC groups
+                  "AD - NDC", "NDC - AD"))
+```
+
+
+###########################################################################
+#DEG Analysis by Kimma (each EOAD patient vs. all NDC clones) using 
+Random effects (ptID),  Covariates and Pairwise Contrast with Voom Weights
+###########################################################################
+
+```{r}
+#create the subgroup and design - rename your conditions!
+#Condition1 is the NDC or the non-standard control
+#Condition2 represents the sporadic AD mutation 
+subgroup <- factor(sampleTable$subcondition, levels=c("NDC", "AD1", "AD2", "AD3", "AD4"))
+```
+
+```{r}
+#Create design matrix to compare each YOAD patient vs. all NDC controls (Version 2)
+#each set of YOAD patient vs. all NDC's
+design2 <- model.matrix(~0 + subgroup + seq.batch + sex, data = sampleTable)
+
+#Rename the NDC column in the design matrix
+colnames(design2)[1] <- "NDC"
+
+#Rename the AD1 column in the design matrix
+colnames(design2)[2] <- "AD1"
+
+#Rename the AD2 column in the design matrix
+colnames(design2)[3] <- "AD2"
+
+#Rename the AD3 column in the design matrix
+colnames(design2)[4] <- "AD3"
+
+#Rename the AD4 column in the design matrix
+colnames(design2)[5] <- "AD4"
+
+#Rename the sequencing batch column in the design matrix
+colnames(design2)[6] <- "seq.batch"
+
+#Rename the sex column in the design matrix
+colnames(design2)[7] <- "sex"
+
+
+#Have four contrast matrices (design model 2)
+#Condition 1 is NDC, Condition 2 is AD1, AD2, AD3, AD4
+#Here we compare the sporadic AD mutation from each patient to all the controls
+contr.matrix1 <- makeContrasts(AD1vsNDC = AD1 - NDC,
+                               levels = colnames(design2))
+
+contr.matrix2 <- makeContrasts(AD2vsNDC = AD2 - NDC,
+                               levels = colnames(design2))
+
+contr.matrix3 <- makeContrasts(AD3vsNDC = AD3 - NDC,
+                               levels = colnames(design2))
+
+contr.matrix4 <- makeContrasts(AD4vsNDC = AD4 - NDC,
+                               levels = colnames(design2))
+
+```
+
+##################################################################
+#DEG Analysis by Limma Voom - eBayes Method (each EOAD patient vs. all NDC clones)
+##################################################################
+
+#EOAD1 vs. all NDC
+```{r}
+#Patient 3682 (Female) vs. all NDC
+v2.1 <- voomWithQualityWeights(y_filtered, design=design2, plot=TRUE)
+fit2.1 <- lmFit(v2.1, design2)
+cfit2.1 <- contrasts.fit(fit2.1, contrasts=contr.matrix1)
+efit2.1 <- eBayes(cfit2.1)
+plotSA(efit2.1, main="Final model: Mean-variance trend")
+dim(efit2.1)
+
+#See DEGs by eBayes method
+summary(decideTests(efit2.1))
+
+#> summary(decideTests(efit2.1))
+#AD1vsNDC
+#Down          8
+#NotSig    21533
+#Up            5
+```
+
+```{r}
+#Patient ID 3796 (Male) vs. all NDC
+v2.2 <- voomWithQualityWeights(y_filtered, design=design2, plot=TRUE)
+fit2.2 <- lmFit(v2.2, design2)
+cfit2.2 <- contrasts.fit(fit2.2, contrasts=contr.matrix2)
+efit2.2 <- eBayes(cfit2.2)
+plotSA(efit2.2, main="Final model: Mean-variance trend")
+dim(efit2.2)
+
+#See DEGs by eBayes method
+summary(decideTests(efit2.2))
+
+#> summary(decideTests(efit2.2))
+#AD2vsNDC
+#Down         11
+#NotSig    21519
+#Up           16
+```
+
+```{r}
+#Patient ID 19009 (Male) vs. all NDC
+v2.3 <- voomWithQualityWeights(y_filtered, design=design2, plot=TRUE)
+fit2.3 <- lmFit(v2.3, design2)
+cfit2.3 <- contrasts.fit(fit2.3, contrasts=contr.matrix3)
+efit2.3 <- eBayes(cfit2.3)
+plotSA(efit2.3, main="Final model: Mean-variance trend")
+dim(efit2.3)
+
+#See DEGs by eBayes method
+summary(decideTests(efit2.3))
+
+#> summary(decideTests(efit2.3))
+#AD3vsNDC
+#Down          19
+#NotSig     21510
+#Up            17
+```
+
+```{r}
+#Patient ID 19012 (Male) vs. all NDC
+v2.4 <- voomWithQualityWeights(y_filtered, design=design2, plot=TRUE)
+fit2.4 <- lmFit(v2.4, design2)
+cfit2.4 <- contrasts.fit(fit2.4, contrasts=contr.matrix4)
+efit2.4 <- eBayes(cfit2.4)
+plotSA(efit2.4, main="Final model: Mean-variance trend")
+dim(efit2.4)
+
+#See DEGs by eBayes method
+summary(decideTests(efit2.4))
+
+#> summary(decideTests(efit2.4))
+#AD4vsNDC
+#Down         17
+#NotSig    21520
+#Up            9
+```
+
+################################################################################
+#DEG Analysis by Kimma (EOAD1, EOAD2, EOAD3 and EOAD4 vs. all NDC clones) 
+using Random effects (ptID),  Covariates and Pairwise Contrast with Voom Weights
+################################################################################
+
+
+```{r}
+
+#Call the voomByQualityWeights() function for EOAD1 vs. all NDC
+kimma.voom.perEOAD <- v2.1 #v2.2, v2.3 and v2.4 are the same
+
+#Source: https://statisticsglobe.com/convert-row-names-into-column-of-data-frame-in-r
+#Add libID column in kimma.voom$targets
+kimma.voom.perEOAD$targets$libID <- row.names(kimma.voom.1$targets)
+
+#Add patientID column in kimma.voom$targets
+kimma.voom.perEOAD$targets$ptID <- sampleTable$patient.no.
+
+#Add subcondition column in the kimma.voom$targets
+kimma.voom.perEOAD$targets$subcondition <- sampleTable$subcondition
+
+#Add seq.batch column in the kimma.voom$targets
+kimma.voom.perEOAD$targets$seq.batch <- sampleTable$seq.batch
+
+#Add sex column in the kimma.voom$targets
+kimma.voom.perEOAD$targets$sex <- sampleTable$sex
+
+#Run linear model in kimma using kmFit with covariates, random effects and  pairwise contrast (each EOAD patient vs. all NDC subjects)
+#Random effects are added to the model with + (1|block) where the block is the variable you want to pair samples by. Thus, we now run a mixed effects model lme in kimma (took ~24 mins)
+kimma_fit2.perEOAD <- kmFit(dat = kimma.voom.perEOAD, model = "~ subcondition + sex + seq.batch + (1|ptID)", patientID = "ptID", libraryID = "libID", counts = "E", genes = "genes", weights = "weights", p_method = "BH", run.lme = TRUE, use_weights = TRUE, metrics = TRUE, run.contrast = TRUE, contrast.var = "subcondition")
+```
+
+#Summarize genes that are significant for subcondition, seq.batch and sex with the random effect (ptID) using kimma
+```{r}
+summarize_kmFit_perEOADvs.NDC_df <- data.table(summarize_kmFit(fdr = kimma_fit2.perEOAD$lme.contrast))
+
+write.csv(summarize_kmFit_perEOADvs.NDC_df, '~/perEOADvs.NDC_lmeContrast_voomWeights_24samples_NEW_DEGTable.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#Get differential results 
+```{r}
+#Get significant results of hypothesis test
+#Filter for adj. pval < 0.05
+kimma_fit.filtered2.perEOAD <- kimma_fit2.perEOAD$lme.contrast %>%
+  dplyr::filter(FDR < 0.05)
+
+write.csv(kimma_fit.filtered2.perEOAD, '~/perEOADvs.NDC_filtered_lmeContrast_voomWeights_24samples_NEW.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#Get all results 
+```{r}
+#Get all results from the hypothesis test
+kimma_fit2.perEOAD_allResults <- kimma_fit2.perEOAD$lme.contrast 
+
+write.csv(kimma_fit2.perEOAD_allResults, '~/perEOADvs.NDC_lmeContrast_voomWeights_24samples_NEW.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#EOAD1 vs. all NDC DEG All Results
+```{r}
+#Summarize genes by contrast_lvl = NDC Female and contrast_ref = AD1 Female 
+kimma_fit2_EOAD1vs.NDC_df <- kimma_fit2.perEOAD_allResults %>%
+  dplyr::filter(contrast_lvl == "NDC Female") %>%
+  dplyr::filter(contrast_ref == "AD1 Female")
+
+#Rename 'gene' column to ENSEMBL
+names(kimma_fit2_EOAD1vs.NDC_df)[names(kimma_fit2_EOAD1vs.NDC_df) == "gene"] <- "ENSEMBL"
+
+#Merge the ENSEMBL-gene SYMBOL reference table with dataframe
+kimma_fit2_EOAD1vs.NDC_df = merge(kimma_fit2_EOAD1vs.NDC_df, final_genes, by = "ENSEMBL")
+
+#Write the .csv file
+write.csv(kimma_fit2_EOAD1vs.NDC_df, '~/EOAD1vs.NDC_lmeContrast_voomWeights_24samples_NEW.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#EOAD1 vs. all NDC DEG Results (FDR < 0.05)
+```{r}
+#Summarize genes by contrast_lvl = NDC Female and contrast_ref = AD1 Female 
+kimma_fit2_EOAD1vs.NDC_filtered.df <- kimma_fit2.perEOAD_allResults %>%
+  dplyr::filter(contrast_lvl == "NDC Female") %>%
+  dplyr::filter(contrast_ref == "AD1 Female") %>%
+  dplyr::filter(FDR < 0.05)
+
+#Rename 'gene' column to ENSEMBL
+names(kimma_fit2_EOAD1vs.NDC_filtered.df)[names(kimma_fit2_EOAD1vs.NDC_filtered.df) == "gene"] <- "ENSEMBL"
+
+#Merge the ENSEMBL-gene SYMBOL reference table with dataframe
+kimma_fit2_EOAD1vs.NDC_filtered.df = merge(kimma_fit2_EOAD1vs.NDC_filtered.df, final_genes, by = "ENSEMBL")
+
+write.csv(kimma_fit2_EOAD1vs.NDC_filtered.df, '~/EOAD1vs.NDC_lmeContrast_voomWeights_24samples_NEW_filtered.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#EOAD2 vs. all NDC DEG All Results
+```{r}
+#Summarize genes by contrast_lvl = AD2 Male and contrast_ref = NDC Female 
+kimma_fit2_EOAD2vs.NDC_df <- kimma_fit2.perEOAD_allResults %>%
+  dplyr::filter(contrast_lvl == "AD2 Male") %>%
+  dplyr::filter(contrast_ref == "NDC Female")
+
+#Rename 'gene' column to ENSEMBL
+names(kimma_fit2_EOAD2vs.NDC_df)[names(kimma_fit2_EOAD2vs.NDC_df) == "gene"] <- "ENSEMBL"
+
+#Merge the ENSEMBL-gene SYMBOL reference table with dataframe
+kimma_fit2_EOAD2vs.NDC_df = merge(kimma_fit2_EOAD2vs.NDC_df, final_genes, by = "ENSEMBL")
+
+#Write the .csv file
+write.csv(kimma_fit2_EOAD2vs.NDC_df, '~/EOAD2vs.NDC_lmeContrast_voomWeights_24samples_NEW.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#EOAD2 vs. all NDC DEG Results (FDR < 0.05)
+```{r}
+#Summarize genes by contrast_lvl = AD2 Male and contrast_ref = NDC Female 
+kimma_fit2_EOAD2vs.NDC_filtered.df <- kimma_fit2.perEOAD_allResults %>%
+  dplyr::filter(contrast_lvl == "AD2 Male") %>%
+  dplyr::filter(contrast_ref == "NDC Female") %>%
+  dplyr::filter(FDR < 0.05)
+
+#Rename 'gene' column to ENSEMBL
+names(kimma_fit2_EOAD2vs.NDC_filtered.df)[names(kimma_fit2_EOAD2vs.NDC_filtered.df) == "gene"] <- "ENSEMBL"
+
+#Merge the ENSEMBL-gene SYMBOL reference table with dataframe
+kimma_fit2_EOAD2vs.NDC_filtered.df = merge(kimma_fit2_EOAD2vs.NDC_filtered.df, final_genes, by = "ENSEMBL")
+
+write.csv(kimma_fit2_EOAD2vs.NDC_filtered.df, '~/EOAD2vs.NDC_lmeContrast_voomWeights_24samples_NEW_filtered.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#EOAD3 vs. all NDC DEG All Results
+```{r}
+#Summarize genes by contrast_lvl = AD3 Male and contrast_ref = NDC Female 
+kimma_fit2_EOAD3vs.NDC_df <- kimma_fit2.perEOAD_allResults %>%
+  dplyr::filter(contrast_lvl == "AD3 Male") %>%
+  dplyr::filter(contrast_ref == "NDC Female")
+
+#Rename 'gene' column to ENSEMBL
+names(kimma_fit2_EOAD3vs.NDC_df)[names(kimma_fit2_EOAD3vs.NDC_df) == "gene"] <- "ENSEMBL"
+
+#Merge the ENSEMBL-gene SYMBOL reference table with dataframe
+kimma_fit2_EOAD3vs.NDC_df = merge(kimma_fit2_EOAD3vs.NDC_df, final_genes, by = "ENSEMBL")
+
+#Write the .csv file
+write.csv(kimma_fit2_EOAD3vs.NDC_df, '~/EOAD3vs.NDC_lmeContrast_voomWeights_24samples_NEW.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#EOAD3 vs. all NDC DEG Results (FDR < 0.05)
+```{r}
+#Summarize genes by contrast_lvl = AD3 Male and contrast_ref = NDC Female 
+kimma_fit2_EOAD3vs.NDC_filtered.df <- kimma_fit2.perEOAD_allResults %>%
+  dplyr::filter(contrast_lvl == "AD3 Male") %>%
+  dplyr::filter(contrast_ref == "NDC Female") %>%
+  dplyr::filter(FDR < 0.05)
+
+#Rename 'gene' column to ENSEMBL
+names(kimma_fit2_EOAD3vs.NDC_filtered.df)[names(kimma_fit2_EOAD3vs.NDC_filtered.df) == "gene"] <- "ENSEMBL"
+
+#Merge the ENSEMBL-gene SYMBOL reference table with dataframe
+kimma_fit2_EOAD3vs.NDC_filtered.df = merge(kimma_fit2_EOAD3vs.NDC_filtered.df, final_genes, by = "ENSEMBL")
+
+write.csv(kimma_fit2_EOAD3vs.NDC_filtered.df, '~/EOAD3vs.NDC_lmeContrast_voomWeights_24samples_NEW_filtered.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#EOAD4 vs. all NDC DEG All Results
+```{r}
+#Summarize genes by contrast_lvl = AD2 Male and contrast_ref = NDC Female 
+kimma_fit2_EOAD4vs.NDC_df <- kimma_fit2.perEOAD_allResults %>%
+  dplyr::filter(contrast_lvl == "NDC Female") %>%
+  dplyr::filter(contrast_ref == "AD4 Female")
+
+#Rename 'gene' column to ENSEMBL
+names(kimma_fit2_EOAD4vs.NDC_df)[names(kimma_fit2_EOAD4vs.NDC_df) == "gene"] <- "ENSEMBL"
+
+#Merge the ENSEMBL-gene SYMBOL reference table with dataframe
+kimma_fit2_EOAD4vs.NDC_df = merge(kimma_fit2_EOAD4vs.NDC_df, final_genes, by = "ENSEMBL")
+
+#Write the .csv file
+write.csv(kimma_fit2_EOAD4vs.NDC_df, '~/EOAD4vs.NDC_lmeContrast_voomWeights_24samples_NEW.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#EOAD4 vs. all NDC DEG Results (FDR < 0.05)
+```{r}
+#Summarize genes by contrast_lvl = AD4 Female and contrast_ref = NDC Female 
+kimma_fit2_EOAD4vs.NDC_filtered.df <- kimma_fit2.perEOAD_allResults %>%
+  dplyr::filter(contrast_lvl == "NDC Female") %>%
+  dplyr::filter(contrast_ref == "AD4 Female") %>%
+  dplyr::filter(FDR < 0.05)
+
+#Rename 'gene' column to ENSEMBL
+names(kimma_fit2_EOAD4vs.NDC_filtered.df)[names(kimma_fit2_EOAD4vs.NDC_filtered.df) == "gene"] <- "ENSEMBL"
+
+#Merge the ENSEMBL-gene SYMBOL reference table with dataframe
+kimma_fit2_EOAD4vs.NDC_filtered.df = merge(kimma_fit2_EOAD4vs.NDC_filtered.df, final_genes, by = "ENSEMBL")
+
+write.csv(kimma_fit2_EOAD4vs.NDC_filtered.df, '~/EOAD4vs.NDC_lmeContrast_voomWeights_24samples_NEW_filtered.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+###########################
+#Create Venn Diagrams
+###########################
+
+#Plot Venn diagram for kimma results (perEOAD vs. NDC)
+```{r}
+plot_venn_genes(model_result = list("kimma contrast" = kimma_fit2.perEOAD$lme.contrast), 
+                fdr.cutoff = 0.05,
+                contrasts = c(
+                  # EOAD vs. NDC groups
+                  "AD1 Female - NDC Female", 
+                  "AD2 Male - NDC Female",
+                  "AD3 Male - NDC Female",
+                  "AD4 Female - NDC Female"
+                  ))
+```
+
+#Create Venn Diagram using nVennR 
+```{r}
+#Rename the variable for EOAD1 vs. NDC DEGs
+EOAD1vs.NDC_DEGs <- kimma_fit2_EOAD1vs.NDC_filtered.df
+#Create a EOAD1 vs. NDC list
+EOAD1vs.NDC_DEGs_list <- list(EOAD1vs.NDC_DEGs_list = as.character(unique(EOAD1vs.NDC_DEGs$SYMBOL)))
+
+#Rename the variable for EOAD2 vs. NDC
+EOAD2vs.NDC_DEGs <- kimma_fit2_EOAD2vs.NDC_filtered.df
+#Create a EOAD1 vs. NDC list
+EOAD2vs.NDC_DEGs_list <- list(EOAD2vs.NDC_DEGs_list = as.character(unique(EOAD2vs.NDC_DEGs$SYMBOL)))
+
+#Rename the variable for EOAD3 vs. NDC
+EOAD3vs.NDC_DEGs <- kimma_fit2_EOAD3vs.NDC_filtered.df
+#Create a EOAD1 vs. NDC list
+EOAD3vs.NDC_DEGs_list <- list(EOAD3vs.NDC_DEGs_list = as.character(unique(EOAD3vs.NDC_DEGs$SYMBOL)))
+
+#Rename the variable for EOAD4 vs. NDC
+EOAD4vs.NDC_DEGs <- kimma_fit2_EOAD4vs.NDC_filtered.df
+#Create a EOAD1 vs. NDC list
+EOAD4vs.NDC_DEGs_list <- list(EOAD4vs.NDC_DEGs_list = as.character(unique(EOAD4vs.NDC_DEGs$SYMBOL)))
+
+#Plot the nVenn Diagram
+myNVenn_perEOAD <- plotVenn(list(EOAD1vs.NDC_DEGs_list, EOAD2vs.NDC_DEGs_list, EOAD3vs.NDC_DEGs_list, EOAD4vs.NDC_DEGs_list), sNames=c("EOAD1", "EOAD2", "EOAD3", "EOAD4"),showPlot = T,nCycles = 1000000)
+showSVG(myNVenn_perEOAD, opacity=0.3,outFile = "~/All4_EOAD1_EOAD2_EOAD3_EOAD4_DEG_nVenn_v2.svg", setColors = c("#78B389", "#FF0033", "#FD8305", "#FFC107"))
+```
+
+```{r}
+#Get common genes by SYMBOL
+EOAD1_EOAD2_common_DEGs <- merge(EOAD1vs.NDC_DEGs, EOAD2vs.NDC_DEGs, by = "SYMBOL")
+EOAD1_EOAD3_common_DEGs <- merge(EOAD1vs.NDC_DEGs, EOAD3vs.NDC_DEGs, by = "SYMBOL")
+EOAD2_EOAD3_common_DEGs <- merge(EOAD2vs.NDC_DEGs, EOAD3vs.NDC_DEGs, by = "SYMBOL")
+EOAD1_EOAD2_EOAD3_common_DEGs <- merge(EOAD1_EOAD2_common_DEGs, EOAD3vs.NDC_DEGs, by = "SYMBOL")
+EOAD1_EOAD2_EOAD3_EOAD4_common_DEGs <- merge(EOAD1_EOAD2_EOAD3_common_DEGs, EOAD4vs.NDC_DEGs, by = "SYMBOL")
+
+#Write .csv files
+write.csv(EOAD1_EOAD2_common_DEGs, file="~/Kimma_lmeContrast_Common_DEGs_EOAD1_EOAD2.csv", sep="\t", quote=F, row.names=T)
+write.csv(EOAD1_EOAD3_common_DEGs, file="~/Kimma_lmeContrast_Common_DEGs_EOAD1_EOAD3.csv", sep="\t", quote=F, row.names=T)
+write.csv(EOAD2_EOAD3_common_DEGs, file="~/Kimma_lmeContrast_Common_DEGs_EOAD2_EOAD3.csv", sep="\t", quote=F, row.names=T)
+write.csv(EOAD1_EOAD2_EOAD3_common_DEGs, file="~/Kimma_lmeContrast_Common_DEGs_EOAD1_EOAD2_EOAD3.csv", sep="\t", quote=F, row.names=T)
+write.csv(EOAD1_EOAD2_EOAD3_EOAD4_common_DEGs, file="~/Kimma_lmeContrast_Common_DEGs_EOAD1_EOAD2_EOAD3_EOAD4.csv", sep="\t", quote=F, row.names=T)
+
+```
+
+
+######################################################################################
+#Module Building using WGCNA for all EOAD patients vs. all NDC subjects
+#Source: https://bigslu.github.io/tutorials/RNAseq/5.RNAseq_gene.set.analysis.html
+######################################################################################
+
+#Variable to use: 
+- option 1:kimma_fit2$lme.contrast (all genes)
+
+```{r}
+#Get all results from the hypothesis test for all EOAD patients
+kimma_fit2.allEOAD_allNDC <- kimma_fit2$lme.contrast
+
+#Get the (-1)* estimate value of the column
+new_estimate <- (-1)*(as.double(kimma_fit2.allEOAD_allNDC$estimate))
+
+#Add new numeric vector as a column to the dataframe
+kimma_fit2.allEOAD_allNDC$new_estimate <- new_estimate
+
+#Remove the old estimate column
+kimma_fit2.allEOAD_allNDC$estimate <- NULL
+
+#Rename 'new_estimate' column to estimate
+names(kimma_fit2.allEOAD_allNDC)[names(kimma_fit2.allEOAD_allNDC) == "new_estimate"] <- "estimate"
+
+#Summarize genes by contrast_lvl = NDC and contrast_ref = AD where estimate = [contrast_lvl - contrast_ref]
+kimma_fit2_allEOAD_allNDC.genes <- kimma_fit2.allEOAD_allNDC %>%
+  dplyr::select(contrast_ref, gene, estimate) #estimate is the log fold change
+
+head(kimma_fit2_allEOAD_allNDC.genes)
+
+#Extract the significant genes where p-value < 0.05
+#Results in 1,312 sig. genes to use for module building
+kimma_fit2_allEOAD_allNDC.genes.sig <- kimma_fit2.allEOAD_allNDC %>%
+  dplyr::filter(pval < 0.05) %>%
+  pull(gene)
+
+#Filter kimma object to only include the significant genes with p-value < 0.05
+kimma_fit2_allEOAD_allNDC.subset <- kimma.voom[kimma_fit2_allEOAD_allNDC.genes.sig, ]
+
+```
+
+#Module Building 
+```{r}
+#Run on muliple processors
+WGCNA::allowWGCNAThreads(nThreads = 4)
+
+#Determine soft threshold
+fit.module <- pickSoftThreshold(data = t(kimma.voom$E),
+                                powerVector = c(1:30),
+                                networkType = "signed")
+```
+
+```{r}
+#Create plot for easier interpretation
+as.data.frame(fit.module$fitIndices) %>%
+  #Calculate scale free topology
+  dplyr::mutate(signed.R.sq = -sign(slope)*SFT.R.sq) %>% 
+  ggplot(aes(x = Power, y = signed.R.sq, label = Power)) +
+  geom_text(size = 3) +
+  theme_classic() +
+  labs(y = "Scale free topology model fit,signed R^2",
+       x = "Soft threshold (power)") +
+  scale_y_continuous(breaks = round(seq(0, 1, by = 0.1), digits = 1))
+```
+#Local maxima reaches at 21 and 25 (two softhresholding powers)
+
+
+#Look at connectivity which is a measure of how many genes in a module meet the correlation cutoff. This roughly correlates with how many genes are in each module with lower connectivity resulting in smaller modules. Here, we see an expected decrease in connectivity with increase in power.
+```{r}
+as.data.frame(fit.module$fitIndices) %>%
+  ggplot(aes(x = Power, y = mean.k., label = Power)) +
+  geom_text(size = 3) +
+  theme_classic() +
+  labs(y = "Mean connectivity",
+       x = "Soft threshold (power)")
+```
+
+```{r}
+#Build modules with two soft thresholding powers
+mod.p21 <- blockwiseModules(datExpr = t(kimma_fit2_allEOAD_allNDC.subset$E),
+                            power = 21,
+                            networkType = "signed",
+                            numericLabels = TRUE,
+                            nthreads = 4)
+
+mod.p25 <- blockwiseModules(datExpr = t(kimma_fit2_allEOAD_allNDC.subset$E),
+                            power = 25,
+                            networkType = "signed",
+                            numericLabels = TRUE,
+                            nthreads = 4)
+
+```
+
+
+#Module with the 21 soft thresholding power (more modules here; n = 12) - Choose this one
+```{r}
+as.data.frame(mod.p21$colors) %>% 
+  rownames_to_column("gene") %>% 
+  dplyr::count(`mod.p21$colors`)
+```
+#Note: module 0 is the trash module
+
+
+#Module with the 25 soft thresholding power (n = 8)
+```{r}
+as.data.frame(mod.p25$colors) %>% 
+  rownames_to_column("gene") %>% 
+  dplyr::count(`mod.p25$colors`)
+```
+#Note: module 0 is the trash module
+
+
+#Minimun module size (chose n = 20)
+```{r}
+mod.p21.m20 <- blockwiseModules(datExpr = t(kimma_fit2_allEOAD_allNDC.subset$E),
+                                power = 21,
+                                networkType="signed",
+                                numericLabels = TRUE,
+                                nthreads = 4,
+                                minModuleSize = 20)
+
+as.data.frame(mod.p21.m20$colors) %>% 
+  rownames_to_column("gene") %>% 
+  dplyr::count(`mod.p21.m20$colors`)
+```
+
+
+#Deep network split (chose n =2)
+```{r}
+mod.p21.s2 <- blockwiseModules(datExpr = t(kimma_fit2_allEOAD_allNDC.subset$E),
+                                power = 21,
+                                networkType="signed",
+                                numericLabels = TRUE,
+                                nthreads = 4,
+                                deepSplit = 2) 
+
+as.data.frame(mod.p21.s2$colors) %>% 
+  rownames_to_column("gene") %>% 
+  dplyr::count(`mod.p21.s2$colors`)
+```
+
+
+#Maximum block size (chose n = 5000)
+```{r}
+mod.p21.b5000 <- blockwiseModules(datExpr = t(kimma_fit2_allEOAD_allNDC.subset$E),
+                                power = 21,
+                                networkType="signed",
+                                numericLabels = TRUE,
+                                nthreads = 4,
+                                maxBlockSize = 5000)
+
+as.data.frame(mod.p21.b5000$colors) %>% 
+  rownames_to_column("gene") %>% 
+  dplyr::count(`mod.p21.b5000$colors`)
+```
+
+
+#Module Annotation
+```{r}
+#Fit the modules
+fit.module2 <- fit_modules(dat = kimma.voom,
+                                genes = kimma_fit2_allEOAD_allNDC.genes.sig, #1,312 sig genes at p-value < 0.05
+                                powerVector = c(1:30),
+                                networkType = "signed",
+                                nThread = 4)
+
+#Rename column 'gene' to 'geneName'
+names(fit.module2$dat)[names(fit.module2$dat) == "genes"] <- "geneName"
+
+
+mod.p21.annotation <- make_modules(
+  fit.module2,
+  sft.value = 21,
+  minModuleSize = 20,
+  maxBlockSize = 5000,
+  deepSplit = 2,
+  networkType = "signed",
+  mods_mean = TRUE, mods_eigen = TRUE,
+  david = TRUE,
+  nThread = 4)
+```
+
+
+#Convert the module annotation
+```{r}
+#Create ENSEMBL to gene table dictionary
+genes.key <- kimma_fit2_allEOAD_allNDC.subset$genes %>% 
+  dplyr::select(ENSEMBL, SYMBOL)
+
+#Rename 'ENSEMBL' column to geneName
+names(genes.key)[names(genes.key) == "ENSEMBL"] <- "geneName"
+
+#Merge gene set key with module annotation
+mod.p21.annotation.symbols <- merge(genes.key, mod.p21.annotation$mods, by = "geneName")
+
+#Remove the geneName column
+mod.p21.annotation.symbols$geneName <- NULL
+
+#Rename 'SYMBOL' column to geneName
+names(mod.p21.annotation.symbols)[names(mod.p21.annotation.symbols) == "SYMBOL"] <- "geneName"
+```
+
+
+#######################################
+#Hypergeometric enrichment of modules
+#######################################
+
+```{r}
+mod.p21_df <- mod.p21.annotation.symbols %>%
+  dplyr::select(module.char, geneName)
+head(mod.p21_df)
+```
+
+
+```{r}
+#Perform hypergeometric test for GOBP pathways
+enrich.mod.p21.GOBP <- BIGprofiler(gene_df = mod.p21_df,
+                          ID = "SYMBOL",
+                          species = "human",
+                          category = "C5",
+                          subcategory = "GO:BP")
+
+#Only select the columns of interest
+enrich.mod.p21.GOBP_df <- enrich.mod.p21.GOBP %>% dplyr::select(group, size_group, gs_cat,	gs_subcat, size_cat.subcat, group_in_cat.subcat,	pathway, size_pathway, group_in_pathway, 'k/K', pval,	FDR,	qvalue)
+
+#Write .csv file
+write.csv(enrich.mod.p21.GOBP_df, file="~/Kimma_lmeContrast_allEOAD.vs.allNDC_WGCNAmodules_GOBP.csv", sep="\t", quote=F, row.names=T)
+
+```
+
+
+```{r}
+#Perform hypergeometric test for GOMF pathways
+enrich.mod.p21.GOMF <- BIGprofiler(gene_df = mod.p21_df,
+                          ID = "SYMBOL",
+                          species = "human",
+                          category = "C5",
+                          subcategory = "GO:MF")
+
+#Only select the columns of interest
+enrich.mod.p21.GOMF_df <- enrich.mod.p21.GOMF %>% dplyr::select(group, size_group, gs_cat,	gs_subcat, size_cat.subcat, group_in_cat.subcat,	pathway, size_pathway, group_in_pathway, 'k/K', pval,	FDR,	qvalue)
+
+#Write .csv file
+write.csv(enrich.mod.p21.GOMF_df, file="~/Kimma_lmeContrast_allEOAD.vs.allNDC_WGCNAmodules_GOMF.csv", sep="\t", quote=F, row.names=T)
+
+```
+
+
+```{r}
+#Perform hypergeometric test for Hallmark pathways (DID NOT WORK)
+enrich.mod.p21.Hallmark <- BIGprofiler(gene_df = mod.p21_df,
+                          ID = "SYMBOL",
+                          species = "human",
+                          category = "H")
+
+#Only select the columns of interest
+enrich.mod.p21.Hallmark_df <- enrich.mod.p21.Hallmark %>% dplyr::select(group, size_group, gs_cat,	gs_subcat, size_cat.subcat, group_in_cat.subcat,	pathway, size_pathway, group_in_pathway, 'k/K', pval,	FDR,	qvalue)
+
+#Write .csv file
+write.csv(enrich.mod.p21.Hallmark_df, file="~/Kimma_lmeContrast_allEOAD.vs.allNDC_WGCNAmodules_Hallmark.csv", sep="\t", quote=F, row.names=T)
+
+```
+
+
+```{r}
+#Perform hypergeometric test for KEGG pathways
+enrich.mod.p21.KEGG <- BIGprofiler(gene_df = mod.p21_df,
+                          ID = "SYMBOL",
+                          species = "human",
+                          category = "C2",
+                          subcategory = "CP:KEGG")
+
+#Only select the columns of interest
+enrich.mod.p21.KEGG_df <- enrich.mod.p21.KEGG %>% dplyr::select(group, size_group, gs_cat,	gs_subcat, size_cat.subcat, group_in_cat.subcat,	pathway, size_pathway, group_in_pathway, 'k/K', pval,	FDR,	qvalue)
+
+#Write .csv file
+write.csv(enrich.mod.p21.KEGG_df, file="~/Kimma_lmeContrast_allEOAD.vs.allNDC_WGCNAmodules_KEGG.csv", sep="\t", quote=F, row.names=T)
+
+```
+
+
+```{r}
+#Perform hypergeometric test for Biocarta pathways
+enrich.mod.p21.Biocarta <- BIGprofiler(gene_df = mod.p21_df,
+                          ID = "SYMBOL",
+                          species = "human",
+                          category = "C2",
+                          subcategory = "CP:BIOCARTA")
+
+#Only select the columns of interest
+enrich.mod.p21.Biocarta_df <- enrich.mod.p21.Biocarta %>% dplyr::select(group, size_group, gs_cat,	gs_subcat, size_cat.subcat, group_in_cat.subcat,	pathway, size_pathway, group_in_pathway, 'k/K', pval,	FDR,	qvalue)
+
+#Write .csv file
+write.csv(enrich.mod.p21.Biocarta_df, file="~/Kimma_lmeContrast_allEOAD.vs.allNDC_WGCNAmodules_Biocarta.csv", sep="\t", quote=F, row.names=T)
+
+```
+
+```{r}
+#Perform hypergeometric test for PID pathways
+enrich.mod.p21.PID <- BIGprofiler(gene_df = mod.p21_df,
+                          ID = "SYMBOL",
+                          species = "human",
+                          category = "C2",
+                          subcategory = "CP:PID")
+
+#Only select the columns of interest
+enrich.mod.p21.PID_df <- enrich.mod.p21.PID %>% dplyr::select(group, size_group, gs_cat,	gs_subcat, size_cat.subcat, group_in_cat.subcat,	pathway, size_pathway, group_in_pathway, 'k/K', pval,	FDR,	qvalue)
+
+#Write .csv file
+write.csv(enrich.mod.p21.PID_df, file="~/Kimma_lmeContrast_allEOAD.vs.allNDC_WGCNAmodules_PID.csv", sep="\t", quote=F, row.names=T)
+
+```
+
+
+```{r}
+#Perform hypergeometric test for REACTOME pathways
+enrich.mod.p21.REACTOME <- BIGprofiler(gene_df = mod.p21_df,
+                          ID = "SYMBOL",
+                          species = "human",
+                          category = "C2",
+                          subcategory = "CP:REACTOME")
+
+#Only select the columns of interest
+enrich.mod.p21.REACTOME_df <- enrich.mod.p21.REACTOME %>% dplyr::select(group, size_group, gs_cat,	gs_subcat, size_cat.subcat, group_in_cat.subcat,	pathway, size_pathway, group_in_pathway, 'k/K', pval,	FDR,	qvalue)
+
+#Write .csv file
+write.csv(enrich.mod.p21.REACTOME_df, file="~/Kimma_lmeContrast_allEOAD.vs.allNDC_WGCNAmodules_REACTOME.csv", sep="\t", quote=F, row.names=T)
+
+```
+
+```{r}
+#Perform hypergeometric test for WIKI pathways
+enrich.mod.p21.WIKI <- BIGprofiler(gene_df = mod.p21_df,
+                          ID = "SYMBOL",
+                          species = "human",
+                          category = "C2",
+                          subcategory = "CP:WIKIPATHWAYS")
+
+#Only select the columns of interest
+enrich.mod.p21.WIKI_df <- enrich.mod.p21.WIKI %>% dplyr::select(group, size_group, gs_cat,	gs_subcat, size_cat.subcat, group_in_cat.subcat,	pathway, size_pathway, group_in_pathway, 'k/K', pval,	FDR,	qvalue)
+
+#Write .csv file
+write.csv(enrich.mod.p21.WIKI_df, file="~/Kimma_lmeContrast_allEOAD.vs.allNDC_WGCNAmodules_WIKI.csv", sep="\t", quote=F, row.names=T)
+
+```
+
+#########################################
+#STRING networks for Hypergeometric Test
+#########################################
+
+#Network colored by enrichment
+```{r}
+string_db <- STRINGdb$new( version="11.5", species=9606, input_directory="", protocol="http")
+
+#Map gene to STRING
+map.mod.p21 <- map_string(genes = kimma_fit2_allEOAD_allNDC.subset$genes$SYMBOL)
+```
+
+#Plot the network of enriched GOBP pathways from hypergeometric test with soft thresholding number of 21
+```{r}
+#Create the network
+enrich.mod.p21.GOBP.network <- plot_string(map = map.mod.p21,
+            enrichment = enrich.mod.p21.GOBP, fdr_cutoff = 0.05, edge_min = 1, enriched_only = TRUE, node_size = 1)
+
+#Save as an .svg file
+ggsave(file="~/allEOADvs.allNDC_GOBP_network.svg", plot=enrich.mod.p21.GOBP.network, width = 100, height = 100, limitsize = FALSE)
+```
+
+
+#Plot the network of enriched Biocarta pathways from hypergeometric test with soft thresholding number of 21
+```{r}
+#Create the network
+enrich.mod.p21.Biocarta.network <- plot_string(map = map.mod.p21,
+            enrichment = enrich.mod.p21.Biocarta, fdr_cutoff = 0.05, edge_min = 1, enriched_only = TRUE, node_size = 1)
+
+#Save as an .svg file
+ggsave(file="~allEOADvs.allNDC_Biocarta_network.svg", plot=enrich.mod.p21.Biocarta.network, width = 100, height = 100, limitsize = FALSE)
+```
+
+
+#Plot the network of enriched GOMF pathways from hypergeometric test with soft thresholding number of 21
+```{r}
+#Create the network
+enrich.mod.p21.GOMF.network <- plot_string(map = map.mod.p21,
+            enrichment = enrich.mod.p21.GOMF, fdr_cutoff = 0.05, edge_min = 1, enriched_only = TRUE, node_size = 1)
+
+#Save as an .svg file
+ggsave(file="~/allEOADvs.allNDC_GOMF_network.svg", plot=enrich.mod.p21.GOMF.network, width = 100, height = 100, limitsize = FALSE)
+```
+
+
+#Plot the network of enriched Hallmark pathways from hypergeometric test with soft thresholding number of 21
+```{r}
+#Create the network
+enrich.mod.p21.Hallmark.network <- plot_string(map = map.mod.p21,
+            enrichment = enrich.mod.p21.Hallmark, fdr_cutoff = 0.05, edge_min = 1, enriched_only = TRUE, node_size = 1)
+
+#Save as an .svg file
+ggsave(file="~/allEOADvs.allNDC_Hallmark_network.svg", plot=enrich.mod.p21.Hallmark.network, width = 100, height = 100, limitsize = FALSE)
+```
+
+
+
+#Plot the network of enriched KEGG pathways from hypergeometric test with soft thresholding number of 21
+```{r}
+#Create the network
+enrich.mod.p21.KEGG.network <- plot_string(map = map.mod.p21,
+            enrichment = enrich.mod.p21.KEGG, fdr_cutoff = 0.05, edge_min = 1, enriched_only = TRUE, node_size = 1)
+
+#Save as an .svg file
+ggsave(file="~/allEOADvs.allNDC_KEGG_network.svg", plot=enrich.mod.p21.KEGG.network, width = 100, height = 100, limitsize = FALSE)
+```
+
+
+#Plot the network of enriched PID pathways from hypergeometric test with soft thresholding number of 21
+```{r}
+#Create the network
+enrich.mod.p21.PID.network <- plot_string(map = map.mod.p21,
+            enrichment = enrich.mod.p21.PID, fdr_cutoff = 0.05, edge_min = 1, enriched_only = TRUE, node_size = 1)
+
+#Save as an .svg file
+ggsave(file="~/allEOADvs.allNDC_PID_network.svg", plot=enrich.mod.p21.PID.network, width = 100, height = 100, limitsize = FALSE)
+```
+
+#Plot the network of enriched REACTOME pathways from hypergeometric test with soft thresholding number of 21
+```{r}
+#Create the network
+enrich.mod.p21.REACTOME.network <- plot_string(map = map.mod.p21,
+            enrichment = enrich.mod.p21.REACTOME, fdr_cutoff = 0.05, edge_min = 1, enriched_only = TRUE, node_size = 1)
+
+#Save as an .svg file
+ggsave(file="~/allEOADvs.allNDC_REACTOME_network.svg", plot=enrich.mod.p21.REACTOME.network, width = 100, height = 100, limitsize = FALSE)
+```
+
+
+#Plot the network of enriched WIKI pathways from hypergeometric test with soft thresholding number of 21
+```{r}
+#Create the network
+enrich.mod.p21.WIKI.network <- plot_string(map = map.mod.p21,
+            enrichment = enrich.mod.p21.WIKI, fdr_cutoff = 0.05, edge_min = 1, enriched_only = TRUE, node_size = 1)
+
+#Save as an .svg file
+ggsave(file="~/allEOADvs.allNDC_WIKI_network.svg", plot=enrich.mod.p21.WIKI.network, width = 100, height = 100, limitsize = FALSE)
+```
+
+
+#######################
+#Save the .RData File
+#######################
+
+```{r}
+#Most recent .RData file prior to manuscript submission
+save.image('~/Kimma_DREAM_WGCNA_Chen_EOAD_NDC_Counts_24samples.RData')
+```
