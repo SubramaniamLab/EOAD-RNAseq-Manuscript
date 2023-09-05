@@ -1,0 +1,2536 @@
+---
+title: "EOAD.RNAseq.Clustering.Heatmap.CellTypes.Analysis"
+output: html_notebook
+date: 09/05/23
+---
+
+#RNAseq analysis using different clustering techniques,
+#heatmap expression profiling, and cell type marker analyses
+
+#Valdes et al., 2023 Molecular Brain Submission
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(version = "3.16")
+BiocManager::install("biomaRt") 
+BiocManager::install("tximport")
+install.packages("dplyr")
+BiocManager::install("DESeq2")
+BiocManager::install("stats")
+BiocManager::install("EnhancedVolcano")
+BiocManager::install('pheatmap')
+BiocManager::install("sva")
+BiocManager::install("ggfortify")
+BiocManager::install("data.table")
+BiocManager::install("tidyverse")
+BiocManager::install("edgeR")
+BiocManager::install("pheatmap")
+BiocManager::install("ggfortify")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("RColorBrewer")
+install.packages(gplots)
+BiocManager::install("statmod")
+BiocManager::install("sva")
+BiocManager::install("rrcov")
+BiocManager::install("Glimma")
+BiocManager::install("ComplexHeatmap")
+BiocManager::install("magick")
+BiocManager::install("umap")
+```
+
+#Load the following packages already installed using RStudio
+```{r}
+library(BiocManager)
+library(biomaRt)
+library(tximport)
+library(dplyr)
+library(data.table)
+library(DESeq2) 
+library(stats)
+library(tidyverse) 
+library(edgeR) 
+library(EnhancedVolcano) 
+library(pheatmap) 
+library(sva) 
+library(limma) 
+library(ggfortify) 
+library(org.Hs.eg.db)
+library(RColorBrewer)
+library(gplots)
+library(statmod)
+library(sva)
+library(rrcov)
+library(Glimma)
+library(ComplexHeatmap)
+library(magick)
+library(umap)
+```
+
+######################################################################
+(Part 1 - Chen Control + EOAD samples)
+
+############################################################
+#Ensembl Transcript to Gene ID's Conversion
+############################################################
+
+```{r}
+#--------------------------------------------------------------------------------------------------------
+# Get the transcript to Gene IDs for Ensembl
+# Use bioMart - make sure the host matches the version you use, which here is GRCh38.104
+#useMart enables connection to a specified BioMart database
+
+#Ensembl version 104
+martGRCh38.104 = biomaRt::useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+                                  dataset = "hsapiens_gene_ensembl",
+                                  host = 'may2021.archive.ensembl.org',
+                                  path="/biomart/martservice") 
+
+#getBM is the main biomaRt query function and this usually retrieves the user's specified attributes
+#from the BioMart database
+GRCh38.104t2g = biomaRt::getBM(attributes = c("ensembl_transcript_id_version",
+                                              "ensembl_gene_id"), mart = martGRCh38.104)
+
+#dplyr::rename function is used to rename columns
+GRCh38.104t2g = dplyr::rename(GRCh38.104t2g, 
+                              TXNAME = ensembl_transcript_id_version, 
+                              ENSEMBL = ensembl_gene_id)
+head(GRCh38.104t2g)
+
+
+```
+
+
+############################################################
+#Accessing Files Needed in Base Directory
+############################################################
+
+```{r}
+#Load the RData file using TSCC, then rerun base_dir, samples, files and all commands before
+load("~/GRCh38.104_TSCC.RData")
+```
+
+
+```{r}
+#--------------------------------------------------------------------------------------------------------
+# Set the base directory containing your files - you must rename this!
+# RNA-seq analysis done by Phoebe Valdes for Goldstein samples
+base_dir <- "~/KallistoOut_Combined" 
+
+#Get samples for reduced model
+samples <- read.table(file.path(base_dir, "novaseq_Chen_RNASamples.txt"), header = TRUE, stringsAsFactors=TRUE)
+
+#For Kallisto, describe the path to find the quant.sf files
+files <- file.path(base_dir, samples$run_sample, "abundance.h5")
+
+#Apply the sample names to "files"
+names(files) <- paste0(c(samples$run_sample))
+
+# Check if all files exist
+all(file.exists(files))
+```
+
+############################################################
+#Import Counts Using Tximport 
+############################################################
+```{r}
+#--------------------------------------------------------------------------------------------------------
+#Import the abundance/counts measurements using tximport 
+
+#Source: https://bioconductor.org/packages/devel/bioc/vignettes/tximport/inst/doc/tximport.html#:~:text=Typically%2C%20abundance%20is%20provided%20by,contains%20the%20effective%20gene%20lengths.
+
+#tximport package has a single function for importing transcript-level estimates.
+#Generate counts from abundances, using the argument countsFromAbundance, scaled to library size, "scaledTPM", or additionally scaled using the average transcript length, averaged over samples and to library size, "lengthScaledTPM".
+txi_lsTPM = tximport(files, 
+                     type = "kallisto", 
+                     tx2gene = GRCh38.104t2g, 
+                     countsFromAbundance = "lengthScaledTPM")
+
+#1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
+#summarizing abundance
+#summarizing counts
+#summarizing length
+#summarizing inferential replicates
+
+#Save RData file in TSCC 
+save.image('~/Tximport_Chen_RNASamples.RData')
+```
+
+###########################################
+#Prepare RNAseq counts for GEO submission
+###########################################
+
+```{r}
+#Get raw counts from the tximport object
+txi_counts <- txi_lsTPM$counts
+
+#Export raw count data ran by PV from R into .csv files
+write.csv(txi_counts, '~/EOAD_NDC_sample_raw_counts.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+##########################
+#Load the imported counts
+##########################
+
+```{r}
+#Loading RData 
+load('~Tximport_Chen_RNASamples.RData')
+```
+
+```{r}
+# Check the head of txi_lsTPM (TPM = transcripts per million)
+head(txi_lsTPM$counts)
+names(txi_lsTPM)
+
+#66015 genes x 24 samples
+dim(txi_lsTPM$counts)
+
+```
+
+###############################################################
+#Limma-Voom Differential Expression for all EOAD vs. all NDC
+###############################################################
+
+```{r}
+## PERFORM DIFFERENTIAL EXPRESSION WITH LIMMA-VOOM ##
+# Convert counts to DGEList 
+y_unfiltered <- DGEList(txi_lsTPM$counts,
+             lib.size = colSums(txi_lsTPM$counts),
+             norm.factors = calcNormFactors(txi_lsTPM$counts),
+             samples = samples$sample,
+             group = samples$condition)
+```
+
+```{r}
+#Unloading dplyr package before using the select() method
+detach("package:dplyr", unload=TRUE)
+
+#Create a Homo Sapiens annotation from the org.Hs.eg.db database 
+Hs_ann = select(org.Hs.eg.db,
+                keys=rownames(y_unfiltered$counts),
+                columns=c("ENTREZID","SYMBOL"),
+                keytype="ENSEMBL",
+                multiVals="first")
+
+# Remove duplicated terms
+Hs_ann <- Hs_ann[!duplicated(Hs_ann[,1]),]
+head(Hs_ann)
+
+#66015 genes by 3 columns
+dim(Hs_ann)
+
+#Apply the annotation to your limma object "y"
+#Match gene symbols to Ensembl IDs
+#this might not work for CERNO
+y_unfiltered$genes <- Hs_ann
+
+# View the library size for each sample
+y_unfiltered$samples
+
+#Number of genes (66015 24)
+dim(y_unfiltered)
+```
+
+###########################################
+#Create color palette and plots for QC'ing
+###########################################
+
+```{r}
+# Load a nice color palette of 50 colors to be used for plots 
+myPalette <- c(brewer.pal(12, "Set1"), brewer.pal(12, "Set2"), brewer.pal(6, "Set3"))
+```
+
+###########################################
+#Create Density plot for unfiltered data
+###########################################
+
+```{r}
+#Convert counts to cpm and log
+unfilteredExpr <- cpm(y_unfiltered, log=T)
+
+#Export unfiltered count data ran by PV from R into .txt files
+write.csv(unfilteredExpr, '~/unfiltered_countdata_Chen_EOAD.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+
+# Plot the density of unfiltered gene expression for all samples within groups
+# Density of log-CPM values for raw pre-filtered data
+plotDensities(unfilteredExpr, group=samples$condition, col = c("#FFA590","#FF0033"), legend="topright", main ="Distribution by Conditions of Unfiltered Data")
+```
+
+###########################################
+#Create Boxplot for unfiltered data
+###########################################
+
+```{r}
+# Add extra space to right of plot area; change clipping to figure
+#(bottom, left, top, right)
+par(mar=c(6, 2, 3, 10), xpd=FALSE)  
+
+# Prepare a vector of colors with specific color for Chen control and Chen EOAD
+colors = c(rep("#FFA590",12), rep("#FF0033",12))
+
+#Change size of the labels for the x-axis
+par(cex.axis=0.6) # is for x-axis
+
+#Make boxplots to compare for unnormalized data plot
+#Boxplots of log-CPM values showing expression distributions for unnormalised data
+boxplot(unfilteredExpr, names = colnames(unfilteredExpr), col = colors, xlab="", ylab="Log2 counts per million",las=2,main="Unnormalized logCPM for Unfiltered Data")
+
+## Lets add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(unfilteredExpr),col="blue")
+
+# Add a legend
+legend("topright", inset=c(-0.4,0), legend = c("NDC_CN", "EOAD") ,
+       col = c("#FFA590","#FF0033") , bty = "n", xpd=TRUE,mar(c(65,5,10,1)), pch=20 , pt.cex = 3, cex = 1, horiz = FALSE)
+```
+
+```{r}
+#Return to default mode
+dev.off()
+```
+
+###############################################
+#Filtering lowly expressed genes
+###############################################
+
+```{r}
+# Filtering lowly expressed genes (method #1)
+# This function is used in tximport manual to remove lowly expressed genes
+keep = filterByExpr(y_unfiltered, min.count=10) #didn't change the  number of filtered genes at the end
+y_filtered <- y_unfiltered[keep,]
+y_filtered <- DGEList(y_filtered)
+
+#Number of genes left after filtering (21546 24)
+dim(y_filtered)
+
+# Calculating normalization factors (method #1)
+y_filtered <- calcNormFactors(y_filtered, method = "TMM") #21546 genes x 24 samples
+
+#Add genes to the 'y_filtered' object
+y_filtered$genes <- Hs_ann
+
+#Add samples to the 'y_filtered' object
+y_filtered$samples
+
+#21546 genes x 24 samples
+dim(y_filtered)
+
+#Create new human annotation for filtered genes (number of genes - 21546 3)
+Hs_ann <- AnnotationDbi::select(org.Hs.eg.db,
+                                keys=rownames(y_filtered$counts),
+                                columns=c("ENTREZID","SYMBOL"),
+                                keytype="ENSEMBL",
+                                multiVals="first")
+
+# Remove duplicated terms (21546 3)
+Hs_ann <- Hs_ann[!duplicated(Hs_ann[,1]),]
+head(Hs_ann)
+
+#21546 genes by 3 samples
+dim(Hs_ann)
+
+#Add genes to the 'y' object
+y_filtered$genes <- Hs_ann
+```
+
+
+#######################################
+#Create Density plot for Filtered data 
+#######################################
+
+```{r}
+#Plot the density of filtered gene expression for all samples within groups (method #1)
+filteredExpr <- cpm(y_filtered, log=T)
+
+#Export filtered count data ran by PV from R into .txt files
+write.csv(filteredExpr, '~/filtered_countdata_Chen_EOAD_ALL.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+
+# Plot the density of unfiltered gene expression for all samples within groups
+# Density of log-CPM values for raw pre-filtered data
+plotDensities(filteredExpr, group=samples$condition, col = c("#FFA590", "#FF0033"), legend="topright", main ="Distribution by Conditions of Filtered Data")
+```
+
+
+#################################################
+#Create Boxplot for Filtered data 
+#################################################
+
+
+```{r}
+# Add extra space to right of plot area; change clipping to figure
+#(bottom, left, top, right)
+par(mar=c(6, 2, 3, 10), xpd=FALSE)  
+
+# Prepare a vector of colors with specific color for Chen control, Chen EOAD, Goldstein control, and FAD control samples
+colors = c(rep("#FFA590", 12), rep("#FF0033",12))
+
+#Change size of the labels for the x-axis
+par(cex.axis=0.6) # is for x-axis
+
+#Make boxplots to compare for unnormalized data plot
+#Boxplots of log-CPM values showing expression distributions for unnormalised data
+boxplot(filteredExpr, names = colnames(filteredExpr), col = colors, xlab="", ylab="Log2 counts per million",las=2,main="Normalized logCPM for Filtered Data")
+
+## Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(filteredExpr),col="blue")
+
+# Add a legend
+legend("topright", inset=c(-0.4,0), legend = c("NDC_CN", "EOAD") ,
+       col = c("#FFA590", "#FF0033") , bty = "n", xpd=TRUE,mar(c(65,5,10,1)), pch=20 , pt.cex = 3, cex = 1, horiz = FALSE)
+
+```
+
+```{r}
+#Return to default mode
+dev.off()
+```
+
+#######################################
+#Creating PCA plot for unfiltered data
+#######################################
+
+```{r}
+#Got help for PCA here:
+#http://monashbioinformaticsplatform.github.io/RNAseq-DE-analysis-with-R/RNAseq_DE_analysis_with_R.html
+#https://rpubs.com/Mentors_Ubiqum/Transpose_Dataframe
+
+#Transpose the counts matrix
+# transpose the unfiltered data to have variables (genes) as columns and (samples) as rows
+data_for_PCA_unfiltered <- as.data.frame((as.matrix(unfilteredExpr)))
+
+#Dimensions should be [66015 genes] x [24 samples]
+dim(data_for_PCA_unfiltered)
+```
+
+```{r}
+#Can also do the following approach using R
+#Source: https://cmdlinetips.com/2019/04/introduction-to-pca-with-r-using-prcomp/
+
+#Transpose the PCA data matrix first
+data_for_PCA_unfilt <- as.data.frame(t(as.matrix(data_for_PCA_unfiltered)))
+
+#Compute PCA for unfiltered data
+myPrcomp_unfilt <- prcomp(data_for_PCA_unfilt, scale. = TRUE)
+summary(myPrcomp_unfilt)
+
+#Compute the variance explained
+var_explained_unfilt <- myPrcomp_unfilt$sdev^2/sum(myPrcomp_unfilt$sdev^2)
+var_explained_unfilt[1:2]
+
+#Create column vector showing replicates
+replicate_ID <- c("NDC_CN1", "NDC_CN2", "NDC_CN3", "NDC_CN4", "NDC_CN5", "NDC_CN6", "NDC_CN7", "NDC_CN8", "NDC_CN9", "NDC_CN10", "NDC_CN11", "NDC_CN12", "EOAD_1", "EOAD_2", "EOAD_3", "EOAD_4", "EOAD_5", "EOAD_6", "EOAD_7", "EOAD_8", "EOAD_9", "EOAD_10", "EOAD_11", "EOAD_12")
+
+#Create column vector showing sample ID's
+patient_ID <- c("3342_1", "3342_2", "3342_3", "3483_3", "3483_4", "3483_21", "3551_3", "3551_5", "3551_6", "8232_1", "8232_3", "8232_6", "3682_2", "3682_4", "3682_5", "3796_5", "3796_8", "3796_10", "19009_15", "19009_17", "19009_18", "19012_2", "19012_6","19012_7")
+
+#Create column vector showing conditions
+condition <- c(rep("NDC_CN",12), rep("EOAD",12))
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make PCA scatter plot using PC1 and PC2 grouped by condition
+#and replicate ID for unfiltered data
+myPrcomp_unfilt$x %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=PC1,y=PC2)) + geom_point(aes(color=condition),size=4) +
+  geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#FFA590", "#FF0033")) +  
+
+  labs(x=paste0("PC1: ",round(var_explained_unfilt[1]*100,1),"%"),
+       y=paste0("PC2: ",round(var_explained_unfilt[2]*100,1),"%")) +
+  ggtitle ("PCA of Samples Based on Unfiltered Data", ) + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+####################################################
+#Creating PCA plot for Filtered data 
+####################################################
+
+```{r}
+#Got help for PCA here:
+#http://monashbioinformaticsplatform.github.io/RNAseq-DE-analysis-with-R/RNAseq_DE_analysis_with_R.html
+#https://rpubs.com/Mentors_Ubiqum/Transpose_Dataframe
+
+#Transpose the counts matrix
+#transpose the filtered data to have variables (genes) as columns and (samples) as rows
+data_for_PCA_filtered <- as.data.frame((as.matrix(filteredExpr)))
+
+#Dimensions should be [21546 genes] x [24 samples]
+dim(data_for_PCA_filtered)
+```
+
+```{r}
+#Can also do the following approach using R
+#Source: https://cmdlinetips.com/2019/04/introduction-to-pca-with-r-using-prcomp/
+
+#Transpose the PCA data matrix first
+data_for_PCA_filt <- as.data.frame(t(as.matrix(data_for_PCA_filtered)))
+
+#Compute PCA for filtered data
+myPrcomp_filt <- prcomp(data_for_PCA_filt, scale. = TRUE)
+summary(myPrcomp_filt)
+autoplot(myPrcomp_filt)
+
+#Compute the variance explained
+var_explained_filt <- myPrcomp_filt$sdev^2/sum(myPrcomp_filt$sdev^2)
+var_explained_filt[1:2]
+
+#Make PCA scatter plot using PC1 and PC2 grouped by condition
+#and replicate ID for filtered data
+
+#Create column vector showing replicates
+replicate_ID <- c("NDC_CN1", "NDC_CN2", "NDC_CN3", "NDC_CN4", "NDC_CN5", "NDC_CN6", "NDC_CN7", "NDC_CN8", "NDC_CN9", "NDC_CN10", "NDC_CN11", "NDC_CN12", "EOAD_1", "EOAD_2", "EOAD_3", "EOAD_4", "EOAD_5", "EOAD_6", "EOAD_7", "EOAD_8", "EOAD_9", "EOAD_10", "EOAD_11", "EOAD_12")
+
+#Create column vector showing sample ID's
+patient_ID <- c("3342_1", "3342_2", "3342_3", "3483_3", "3483_4", "3483_21", "3551_3", "3551_5", "3551_6", "8232_1", "8232_3", "8232_6", "3682_2", "3682_4", "3682_5", "3796_5", "3796_8", "3796_10", "19009_15", "19009_17", "19009_18", "19012_2", "19012_6","19012_7")
+
+#Create column vector showing conditions
+condition <- c(rep("NDC_CN",12), rep("EOAD",12))
+
+#Make PCA scatter plot using PC1 and PC2 grouped by diagnostic code
+#and replicate ID for unfiltered data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make PCA scatter plot using PC1 and PC2 grouped by condition
+#and replicate ID for unfiltered data
+myPrcomp_filt$x %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=PC1,y=PC2)) + geom_point(aes(color=condition),size=4) +
+  geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#FFA590", "#FF0033")) +  
+  labs(x=paste0("PC1: ",round(var_explained_filt[1]*100,1),"%"),
+       y=paste0("PC2: ",round(var_explained_filt[2]*100,1),"%")) +
+  ggtitle ("PCA of Samples Based on Filtered Data", ) + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+################################################
+#Retreive PC1 and PC2 Values to input for Prism
+################################################
+
+#Get values
+```{r}
+#Get PCA scores
+PCA_scores_filtered <- myPrcomp_filt$x
+
+#Write the .csv file with all PCA scores 
+write.csv(PCA_scores_filtered, '~/filtered_PCA_scores_Chen_EOAD.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#Save RData file in local desktop 
+```{r}
+save.image('~/Limma-Voom_Chen_EOAD.RData')
+```
+
+
+#################################################################################
+
+##################################################################################
+#Creating Design Model Matrix when comparing AD samples against NDC samples
+##################################################################################
+
+```{r}
+#Create a sample table with the list of conditions replicates and clone #'s
+#Make excel file and export here (.csv file without MCI patients)
+sampleTable <- data.table(read.csv('~/sampleTable2_24samples.csv'))
+
+#create the group and design - rename your conditions!
+#Condition1 is the NDC or the non-standard control
+#Condition2 represents the sporadic AD mutation 
+group <- factor(sampleTable$condition,levels=c("NDC","AD"))
+```
+
+################################################################################
+
+###############################################################
+#Modified limma-voom with covariates using removeBatchEffects()
+###############################################################
+
+
+```{r}
+#define each covariate as its own individual factor 
+#group <- factor(samples$condition,levels=c("NDC","AD"))
+condition <- factor(samples$condition,levels=c("NDC_CN","EOAD"))
+subgroup <- factor(sampleTable$subcondition, levels=c("NDC", "AD1", "AD2", "AD3", "AD4"))
+sex <- factor(sampleTable$sex, levels=c("Male", "Female"))
+seq.batch <- factor(sampleTable$seq.batch, levels = c("1", "2"))
+RNA.batch <- factor(sampleTable$RNA.batch, levels = c("1", "2"))
+```
+
+#Run removeBatchEffects()
+```{r}
+#How to run removebatchEffects()
+#Note: need to remove seq.batch because it is only 1 sample (do not do!)
+#design_bc <- model.matrix(~0+condition+sex+RNA.batch+seq.batch, data = sampleTable)
+design_bc <- model.matrix(~0 + condition + sex + seq.batch, data = sampleTable)
+
+#Have four contrast matrices (design model 1)
+#Condition 1 is NDC, Condition 2 is AD
+#Here we compare the sporadic AD mutation to the control
+contr.matrix_bc <- makeContrasts(conditionADvsconditionNDC = conditionAD - conditionNDC, levels = colnames(design_bc))
+
+levels_bc = colnames(design_bc)
+print(levels_bc)
+
+#Load the contrast matrix using batch correction
+contr.matrix_bc
+
+#Create the treatment condition design matrix
+comparison.design <- design_bc[,1:2]
+
+#Create the vector of batches to account for (sex and seq batch)
+batch.design <- design_bc[,c(3:4)]
+
+#Already include the contrast step of voom when batch correction,
+#don't want to double dip according to Andrew
+#design are the treatment conditions: diseased versus controls
+#covariates is the matrix of covariates to be adjusted for (sex and sequencing batch)
+cpm_counts_bc <- removeBatchEffect((cpm_counts),design=comparison.design,covariates=batch.design)
+```
+
+```{r}
+#How to run MDS plotting with batch correction 
+glimmaPlot_BC <- Glimma::glimmaMDS(cpm_counts_bc,group=sampleTable, continuous.color = TRUE)
+```
+
+
+################################################################
+#Get MDS coordinates after batch correction to input into Prism
+################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction 
+MDS_scores_EOAD_NDC_bc <- glimmaPlot_BC$x$data$mdsData
+
+#Write the .csv file with all UMAP scores 
+write.csv(MDS_scores_EOAD_NDC_bc, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+################################################################
+#DO UMAP clustering after batch correction of filtered genes
+################################################################
+
+#Grab the normalized counts from the filteredExpresion data and get gene symbols
+```{r}
+#Obtain the columns of ensemblID's and gene symbols
+final_genes = data.frame(y_filtered$genes["ENSEMBL"], y_filtered$genes["SYMBOL"])
+
+#Use the counts that have been batch corrected by sex and sequencing batch
+#Move the index column to the first column called ENSEMBL for batch corrected counts
+#Source: https://stackoverflow.com/questions/36396911/r-move-index-column-to-first-column
+filteredExpr_genes_bc <- cbind(ENSEMBL = rownames(cpm_counts_bc), cpm_counts_bc)
+rownames(cpm_counts_bc) <- 1:nrow(cpm_counts_bc)
+```
+
+```{r}
+#Create a new filtered object with gene symbols 
+#Obtain filtered count matrix with gene symbols using the merge() function
+final_counts_filtered_genes_bc <- merge(final_genes,filteredExpr_genes_bc, by="ENSEMBL")
+
+#Remove the ENSEMBL ID column
+final_counts_filtered_genes_bc$ENSEMBL <- NULL
+
+#Get the final normalized, filtered counts with gene symbols
+write.csv(final_counts_filtered_genes_bc, '~/filtered_normalized_countdata_genes_EOAD_24samples_batchCorrection_PV.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+```{r}
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_UMAP_filtered_num_bc <- as.data.frame(final_counts_filtered_genes_bc[,-1], row.names = final_counts_filtered_genes_bc[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_UMAP_filtered_num_bc <- mutate_all(data_for_UMAP_filtered_num_bc, function(x) as.numeric(as.character(x)))
+```
+
+
+#######################################################
+#Run UMAP with Euclidean Metric after Batch Correction
+#######################################################
+
+#Run UMAP with default metric feature ("euclidean")
+```{r}
+#Transpose the UMAP data matrix first so genes are the columns and samples are the rows
+#Note: PER sample technically means PER replicate
+data_for_UMAP_filtered_bc <- as.data.frame(t(as.matrix(data_for_UMAP_filtered_num_bc)))
+
+#Run Euclidean UMAP
+umap.counts_EOAD_NDC_euclidean_bc <- umap(data_for_UMAP_filtered_bc, n_neighbors = 3, metric= "euclidean")
+```
+
+
+#Plot the UMAP results using the euclidean metric 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_EOAD - #6f6f6f
+#EOAD - #b32357
+umap.counts_EOAD_NDC_euclidean_bc$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6f6f6f", "#b32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+##################################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (Euclidean)
+##################################################################################
+
+#Get values from the euclidean metric
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_euclidean_bc <- umap.counts_EOAD_NDC_euclidean_bc$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_euclidean_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_ALL_euclidean_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#######################################################
+#Run UMAP with Cosine Metric after Batch Correction
+#######################################################
+
+#Run UMAP with default metric feature ("cosine")
+```{r}
+#Run Cosine UMAP
+umap.counts_EOAD_NDC_cosine_bc <- umap(data_for_UMAP_filtered_bc, n_neighbors = 3, metric = "cosine")
+```
+
+
+#Plot the UMAP results using the cosine metric 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_EOAD - #6f6f6f
+#EOAD - #b32357
+umap.counts_EOAD_NDC_cosine_bc$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6f6f6f", "#b32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+##################################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (Cosine)
+##################################################################################
+
+#Get values from the cosine metric
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_cosine_bc <- umap.counts_EOAD_NDC_cosine_bc$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_cosine_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_ALL_cosine_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#######################################################
+#Run UMAP with Pearson Metric after Batch Correction
+#######################################################
+
+#Run UMAP with default metric feature ("pearson")
+```{r}
+#Run Pearson UMAP
+umap.counts_EOAD_NDC_pearson_bc <- umap(data_for_UMAP_filtered_bc, n_neighbors = 3, metric = "pearson")
+```
+
+
+#Plot the UMAP results using the pearson metric 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_EOAD - #6f6f6f
+#EOAD - #b32357
+umap.counts_EOAD_NDC_pearson_bc$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6f6f6f", "#b32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+##################################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (Pearson)
+##################################################################################
+
+#Get values from the euclidean metric
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_pearson_bc <- umap.counts_EOAD_NDC_pearson_bc$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_pearson_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_ALL_pearson_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+###############################################################
+#Run UMAP with centered Pearson Metric after Batch Correction
+###############################################################
+
+#Run UMAP with default metric feature ("pearson")
+```{r}
+#Run Pearson UMAP
+umap.counts_EOAD_NDC_pearson_bc <- umap(data_for_UMAP_filtered_bc, n_neighbors = 3, metric = "pearson")
+```
+
+
+#Plot the UMAP results using the pearson metric 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_EOAD - #6f6f6f
+#EOAD - #b32357
+umap.counts_EOAD_NDC_pearson_bc$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6f6f6f", "#b32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+##################################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (Pearson)
+##################################################################################
+
+#Get values from the pearson metric
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_pearson_bc <- umap.counts_EOAD_NDC_pearson_bc$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_pearson_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_ALL_pearson_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+##############################################################
+#Run UMAP with centered Pearson Metric after Batch Correction
+##############################################################
+
+#Run UMAP with default metric feature ("pearson2")
+```{r}
+#Run centered Pearson UMAP
+umap.counts_EOAD_NDC_centeredPearson_bc <- umap(data_for_UMAP_filtered_bc, n_neighbors = 3, metric = "pearson2")
+```
+
+
+#Plot the UMAP results using the centered Pearson metric 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_EOAD - #6f6f6f
+#EOAD - #b32357
+umap.counts_EOAD_NDC_centeredPearson_bc$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6f6f6f", "#b32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+##################################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (centered Pearson) 
+##################################################################################
+
+#Get values from the centered Pearson metric
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_centeredPearson_bc <- umap.counts_EOAD_NDC_centeredPearson_bc$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_centeredPearson_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_ALL_centeredPearson_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#######################################################
+#Run UMAP with Manhattan Metric after Batch Correction
+#######################################################
+
+#Run UMAP with default metric feature ("manhattan")
+```{r}
+#Run Euclidean UMAP
+umap.counts_EOAD_NDC_manhattan_bc <- umap(data_for_UMAP_filtered_bc, n_neighbors = 3, metric = "manhattan")
+```
+
+
+#Plot the UMAP results using the Manhattan metric 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_EOAD - #6f6f6f
+#EOAD - #b32357
+umap.counts_EOAD_NDC_manhattan_bc$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6f6f6f", "#b32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+##################################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (Manhattan)
+##################################################################################
+
+#Get values from the manhattan metric
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_manhattan_bc <- umap.counts_EOAD_NDC_manhattan_bc$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_manhattan_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_ALL_Manhattan_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#######################################################################################
+#Do MDS and UMAP clustering based on only neuron lineage only and batch corrected genes
+#######################################################################################
+
+#Get neuron lineage and function genes
+```{r}
+#Read the .csv file with the list of genes for each endotype
+custom_endo_genes = read.csv("~/CustomEndotypes.csv")
+
+#Get gene symbols that are only neuronal related
+neuron_lineage_genes = data.frame(custom_endo_genes$Neuron_Lineage_Custom_Endtype)
+
+#Rename the column names for neuronal genes to SYMBOL
+colnames(neuron_lineage_genes) <- c("SYMBOL")
+```
+
+
+#Subset all expression counts PER replicate into only neuronal lineage genes
+```{r}
+#Load in the filtered, normalized counts PER replicate
+final_counts_filtered_genes_bc <- read.table(file = '~/filtered_normalized_countdata_genes_EOAD_24samples_batchCorrection_PV.csv', row.names = NULL, sep=',', header = T) 
+
+#Have the X column has NULL
+final_counts_filtered_genes_bc$X <- NULL
+
+```
+
+
+```{r}
+#Subset counts into only batch corrected neuron lineage genes
+#Merge two data frames by ID
+#1,078 genes x 24 samples
+neuron_lineage_merge_ALL <- merge(final_counts_filtered_genes_bc,neuron_lineage_genes,by="SYMBOL")
+
+#Write the .csv file
+write.csv(neuron_lineage_merge_ALL, '~/filtered_normalized_countdata_genes_EOAD_24samples.batchCorrection.neuronLineageGenes.csv', append=FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+
+```
+
+###########################################################################
+#Run MDS with neuron lineage only, filtered counts after batch correction
+###########################################################################
+
+```{r}
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+
+data_for_MDS_filtered_NL <- neuron_lineage_merge_ALL
+
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_MDS_filtered_NL_num <- as.data.frame(data_for_MDS_filtered_NL[,-1], row.names = data_for_MDS_filtered_NL[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_MDS_filtered_NL_num <- mutate_all(data_for_MDS_filtered_NL_num, function(x) as.numeric(as.character(x)))
+
+#Rename variable
+data_for_MDS_filtered_NL_num_bc <- data_for_MDS_filtered_NL_num
+
+```
+
+```{r}
+#How to run MDS plotting with batch correction 
+glimmaPlot_EOAD_NDC_batchCorrection_MDS <- Glimma::glimmaMDS(data_for_MDS_filtered_NL_num_bc,group=sampleTable, continuous.color = TRUE)
+```
+
+
+##############################################################################
+#Get MDS coordinates after batch correction with NL genes to input into Prism
+##############################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction with NL genes 
+MDS_scores_EOAD_NDC_bc_NL <- glimmaPlot_EOAD_NDC_batchCorrection_MDS$x$data$mdsData
+
+#Write the .csv file with all UMAP scores 
+write.csv(MDS_scores_EOAD_NDC_bc_NL, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.NL.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+###############################################################
+#Do UMAP analysis here for batch corrected NL only gene counts
+###############################################################
+
+#######################################
+#Run UMAP with Euclidean metric
+#######################################
+
+#Run UMAP with default metric feature ("euclidean") based on neuron lineage genes
+```{r}
+#Transpose the UMAP data matrix first so genes are the columns and samples are the rows
+#Note: PER sample technically means PER replicate
+data_for_UMAP_filtered_NL_num_bc <- t(data_for_MDS_filtered_NL_num_bc)
+
+#Run Euclidean UMAP (n_neighbors = 3)
+umap.EOAD_NDC_filtered_NL_bc_euclidean <- umap(data_for_UMAP_filtered_NL_num_bc, n_neighbors = 3, metric = "euclidean")
+
+```
+
+#Plot the UMAP results using the euclidean metric (n_neighbors = 3) 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_CN - #6F6F6F
+#EOAD - #B32357
+umap.EOAD_NDC_filtered_NL_bc_euclidean$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6F6F6F", "#B32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered NL Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (Euclidean)
+################################################################
+
+#Get values from the euclidean metric (n_neighbors = 3)
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_NL_euc_bc <- umap.EOAD_NDC_filtered_NL_bc_euclidean$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_NL_euc_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_NL_euclidean_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#######################################
+#Run UMAP with Cosine metric
+#######################################
+
+#Run UMAP with default metric feature ("cosine") based on neuron lineage genes
+```{r}
+#Run Cosine UMAP (n_neighbors = 3)
+umap.EOAD_NDC_filtered_NL_bc_cosine <- umap(data_for_UMAP_filtered_NL_num_bc, n_neighbors = 3, metric = "cosine")
+
+```
+
+#Plot the UMAP results using the cosine metric (n_neighbors = 3) 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_CN - #6F6F6F
+#EOAD - #B32357
+umap.EOAD_NDC_filtered_NL_bc_cosine$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6F6F6F", "#B32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered NL Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (Cosine)
+################################################################
+
+#Get values from the cosine metric (n_neighbors = 3)
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_NL_cosine_bc <- umap.EOAD_NDC_filtered_NL_bc_cosine$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_NL_cosine_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_NL_cosine_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#######################################
+#Run UMAP with Pearson metric
+#######################################
+
+#Run UMAP with default metric feature ("pearson") based on neuron lineage genes
+```{r}
+#Run Pearson UMAP (n_neighbors = 3)
+umap.EOAD_NDC_filtered_NL_bc_pearson <- umap(data_for_UMAP_filtered_NL_num_bc, n_neighbors = 3, metric = "pearson")
+
+```
+
+#Plot the UMAP results using the pearson metric (n_neighbors = 3) 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_CN - #6F6F6F
+#EOAD - #B32357
+umap.EOAD_NDC_filtered_NL_bc_pearson$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6F6F6F", "#B32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered NL Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (Pearson)
+################################################################
+
+#Get values from the pearson metric (n_neighbors = 3)
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_NL_pearson_bc <- umap.EOAD_NDC_filtered_NL_bc_pearson$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_NL_pearson_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_NL_pearson_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#######################################
+#Run UMAP with centered Pearson metric
+#######################################
+
+#Run UMAP with default metric feature ("pearson2") based on neuron lineage genes
+```{r}
+#Run centered Pearson UMAP (n_neighbors = 3)
+umap.EOAD_NDC_filtered_NL_bc_centeredPearson <- umap(data_for_UMAP_filtered_NL_num_bc, n_neighbors = 3, metric = "pearson2")
+
+```
+
+#Plot the UMAP results using the centered Pearson metric (n_neighbors = 3) 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_CN - #6F6F6F
+#EOAD - #B32357
+umap.EOAD_NDC_filtered_NL_bc_centeredPearson$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6F6F6F", "#B32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered NL Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+#######################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (centered Pearson)
+#######################################################################
+
+#Get values from the centered Pearson metric (n_neighbors = 3)
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_NL_centeredPearson_bc <- umap.EOAD_NDC_filtered_NL_bc_centeredPearson$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_NL_centeredPearson_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_NL_centeredPearson_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#Run UMAP with default metric feature ("Manhattan") based on neuron lineage genes
+```{r}
+#Run Manhattan UMAP (n_neighbors = 3)
+umap.EOAD_NDC_filtered_NL_bc_Manhattan <- umap(data_for_UMAP_filtered_NL_num_bc, n_neighbors = 3, metric = "manhattan")
+
+```
+
+#Plot the UMAP results using the Manhattan metric (n_neighbors = 3) 
+```{r}
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by diagnostic code
+#and replicate ID for filtered z-score data
+
+#Increase the max overlaps for ggrepel
+options(ggrepel.max.overlaps = 15)
+
+#Make UMAP scatter plot using UMAP1 and UMAP2 grouped by condition
+#and replicate ID for filtered z-score data
+#RGB Codes:
+#NDC_CN - #6F6F6F
+#EOAD - #B32357
+umap.EOAD_NDC_filtered_NL_bc_Manhattan$layout %>% 
+  as.data.frame %>%
+  rownames_to_column("SampleID") %>%
+  add_column(subcondition = replicate_ID) %>%
+  add_column(subcondition2 = patient_ID) %>%
+  add_column(condition = condition) %>%
+  ggplot(aes(x=V1,y=V2)) + geom_point(aes(color=condition),size=4) + geom_text_repel(aes(label =subcondition2),
+                  force = 25,
+                  segment.size  = 0.2,
+                  segment.color = "grey50") +
+scale_color_manual(values = c("#6F6F6F", "#B32357")) +  
+  labs(x="UMAP1", y="UMAP2") + 
+  ggtitle("UMAP of Samples Based on Filtered NL Count Data") + theme_bw() + 
+ theme(plot.title = element_text(hjust = 0.5, size = 24, face ="bold"), axis.text = element_text(size=20), axis.title = element_text(size=20), legend.position="bottom") #center title and bold face
+```
+
+#######################################################################
+#Retreive UMAP1 and UMAP2 Values to input for Prism (Manhattan)
+#######################################################################
+
+#Get values from the Manhattan metric (n_neighbors = 3)
+```{r}
+#Get UMAP scores PER replicate
+UMAP_scores_EOAD_NDC_NL_Manhattan_bc <- umap.EOAD_NDC_filtered_NL_Manhattan_bc$layout
+
+#Write the .csv file with all UMAP scores 
+write.csv(UMAP_scores_EOAD_NDC_NL_Manhattan_bc, '~/filteredCounts_UMAP_scores_EOAD_NDC_NL_Manhattan_bc.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+##################################################################
+
+###############################################################################################
+#Determine neuron proportions (inhibitory, excitatory, astrocytes, microglia, oligodendrocytes, oligodendrocyte precursor, and immature cells from all cell types) from all filtered genes  
+###############################################################################################
+
+
+#Get raw, filtered counts
+```{r}
+y_filtered_raw <- y_unfiltered[keep,]
+y_filtered_raw <- DGEList(y_filtered_raw)
+raw_final_counts_filtered_genes_24samples <- y_filtered_raw$counts
+
+#Use the filtered, raw counts
+#Move the index column to the first column called ENSEMBL 
+#Source: https://stackoverflow.com/questions/36396911/r-move-index-column-to-first-column
+raw_final_counts_filtered_genes_symbols_24samples <- cbind(ENSEMBL = rownames(raw_final_counts_filtered_genes_24samples), raw_final_counts_filtered_genes_24samples)
+rownames(raw_final_counts_filtered_genes_symbols_24samples) <- 1:nrow(raw_final_counts_filtered_genes_symbols_24samples)
+
+
+#Create a new filtered object with gene symbols 
+#Obtain filtered count matrix with gene symbols using the merge() function
+raw_final_counts_filtered_genes_symbols_24samples <- merge(final_genes,raw_final_counts_filtered_genes_symbols_24samples, by="ENSEMBL")
+
+#Remove the ENSEMBL ID column
+raw_final_counts_filtered_genes_symbols_24samples$ENSEMBL <- NULL
+```
+
+#Write the .csv file for all filtered raw counts
+```{r}
+#Write the .csv file
+write.csv(raw_final_counts_filtered_genes_symbols_24samples, '~/filteredCounts_24samples.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#############################################################################
+#Excitatory Neurons from Literature, Allen Brain Atlas and Custom Annotation
+#############################################################################
+
+#Retreive excitatory neuron markers from Leng et al., 2023
+```{r}
+#Read .csv file for excitatory neurons
+EN_genes_Leng2021 <- data.table(read.csv('~/Leng_2021_Excitatory_Neurons_Genes.csv'))
+
+#Read .csv file for inhibitory neurons
+IN_genes_v2 <- data.table(read.csv('~/Trujillo_2019_Anderson_2020_Wang_2022_Leng_2021_Inhibitory_Neurons.csv'))
+
+#Remove any IN genes from this current list of EN genes
+EN_IN_genes_merge_v2 <- merge(EN_genes_Leng2021, IN_genes_v2,by="SYMBOL")
+
+#Read.csv file for modified list of excitatory neurons
+EN_genes_remove_v2 <- data.table(read.csv('~/Leng_2021_Excitatory_Neurons_Genes_remove.csv'))
+
+
+#Merge the excitatory neuron gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files (need to remove from the EN gene list)
+EN_filtered_counts_v2 <- merge(EN_genes_remove_v2, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Write the .csv file (USED FOR SUBMITTED MANUSCRIPT)
+write.csv(EN_filtered_counts_v2, '~/filteredCounts_24samples_ENs.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#Get set of excitatory neurons from Allen Brain Atlas and Custom Annotation 
+```{r}
+#Read gene symbols for excitatory neurons manually curated from Allen Brain Atlas
+EN_genes_ABA_custom <- data.table(read.csv('~/ENs_M1_10x_Custom_Annot_Genes.csv'))
+```
+
+
+#Combine gene symbols from both Allen Brain Atlas, publication curation from Leng et al., 2021 paper and custom annotation
+```{r}
+EN_genes_lit_ABA <- rbind(EN_genes_remove_v2, EN_genes_ABA_custom)
+
+#Merge the excitatory neuron gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+EN_filtered_counts_v3 <- merge(EN_genes_lit_ABA, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Get distinct values (n = 5,228 genes)
+EN_filtered_counts_v3_distinct <- distinct(EN_filtered_counts_v3)
+
+#Write the .csv file 
+write.csv(EN_filtered_counts_v3_distinct, '~/filteredCounts_24samples_ENs_v3.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#############################################################################
+#Do MDS clustering based on only Excitatory Neurons and batch corrected genes
+#############################################################################
+
+##DO Excitatory Neurons [MDS clustering] here 
+```{r}
+#Subset counts into only batch corrected excitatory neuron genes
+#Merge two data frames by ID
+#6,024 genes x 24 samples
+EN_genes_lit_ABA_merge_ALL <- merge(final_counts_filtered_genes_bc, EN_genes_lit_ABA,by="SYMBOL")
+```
+
+###########################################################################
+#Run MDS with Excitatory Neurons only, filtered counts after batch correction
+###########################################################################
+
+```{r}
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+
+data_for_MDS_filtered_ENs <- EN_genes_lit_ABA_merge_ALL
+
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_MDS_filtered_ENs_num <- as.data.frame(data_for_MDS_filtered_ENs[,-1], row.names = data_for_MDS_filtered_ENs[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_MDS_filtered_ENs_num_bc <- mutate_all(data_for_MDS_filtered_ENs_num, function(x) as.numeric(as.character(x)))
+
+```
+
+```{r}
+#How to run MDS plotting with batch correction
+glimmaPlot_EOAD_NDC_batchCorrection_MDS_ENs <- Glimma::glimmaMDS(data_for_MDS_filtered_ENs_num_bc, group=sampleTable, continuous.color = TRUE)
+```
+
+
+#############################################################################
+#Get MDS coordinates after batch correction with Excitatory Neuron genes to input into Prism
+#############################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction with Oligodendrocyte genes 
+MDS_scores_EOAD_NDC_bc_ENs <- glimmaPlot_EOAD_NDC_batchCorrection_MDS_ENs$x$data$mdsData
+
+#Write the .csv file with all MDS scores 
+write.csv(MDS_scores_EOAD_NDC_bc_ENs, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.ENs.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+###################################################################
+#Excitatory Immature Neurons from Literature and Custom Annotation
+###################################################################
+
+#Subset excitatory neuron filtered counts for only immature genes
+```{r}
+#Read the .csv file 
+Immature_genes <- data.table(read.csv('~/Custom_Cell_Type_Annotation/Custom_Immature_Neurons.csv'))
+
+#Get the immature excitatory neuron markers available (DCX and TUBB3)
+Immature_EN_genes <- merge(EN_filtered_counts_v3, Immature_genes,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Immature_EN_genes, '~/filteredCounts_24samples_Immature_ENs.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+##############################################################################
+#Inhibitory Neurons from Literature, Allen Brain Atlas and Custom Annotation
+##############################################################################
+
+#Subset raw, filtered counts for inhibitory neurons (including from Leng et al., 2021)
+```{r}
+#Read .csv file for inhibitory neurons
+IN_genes_v2 <- data.table(read.csv('~/Trujillo_2019_Anderson_2020_Wang_2022_Leng_2021_Inhibitory_Neurons.csv'))
+
+IN_filtered_counts_v2 <- merge(IN_genes_v2, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Write the .csv file
+write.csv(IN_filtered_counts_v2, '~/filteredCounts_INs/050823_filteredCounts_24samples_INs_v2.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#Get set of inhibitory neurons from Allen Brain Atlas and custom annotation 
+```{r}
+#Read gene symbols for inhibitory neurons manually curated from Allen Brain Atlas
+IN_genes_ABA_custom <- data.table(read.csv('~/INs_M1_10x_Custom_Annot_Genes.csv'))
+```
+
+
+#Combine gene symbols from both Allen Brain Atlas, custom annotation and publication curation from combined literature search
+```{r}
+IN_genes_lit_ABA_custom <- rbind(IN_genes_v2, IN_genes_ABA_custom)
+
+#Merge the inhibitory neuron gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+IN_filtered_counts_v3 <- merge(IN_genes_lit_ABA_custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Get distinct values (n = 4,751 genes)
+IN_filtered_counts_v3_distinct <- distinct(IN_filtered_counts_v3)
+
+#Write the .csv file 
+write.csv(IN_filtered_counts_v3_distinct, '~/filteredCounts_24samples_INs_v3.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#############################################################################
+#Do MDS clustering based on only Inhibitory Neurons and batch corrected genes
+#############################################################################
+
+##DO Inhibitory Neurons [MDS clustering] here 
+```{r}
+#Subset counts into only batch corrected excitatory neuron genes
+#Merge two data frames by ID
+#4,840 genes x 24 samples
+IN_genes_lit_ABA_custom_merge_ALL <- merge(final_counts_filtered_genes_bc, IN_genes_lit_ABA_custom,by="SYMBOL")
+```
+
+###########################################################################
+#Run MDS with Excitatory Neurons only, filtered counts after batch correction
+###########################################################################
+
+```{r}
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+
+data_for_MDS_filtered_INs <- IN_genes_lit_ABA_custom_merge_ALL
+
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_MDS_filtered_INs_num <- as.data.frame(data_for_MDS_filtered_INs[,-1], row.names = data_for_MDS_filtered_INs[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_MDS_filtered_INs_num_bc <- mutate_all(data_for_MDS_filtered_INs_num, function(x) as.numeric(as.character(x)))
+
+```
+
+```{r}
+#How to run MDS plotting with batch correction 
+glimmaPlot_EOAD_NDC_batchCorrection_MDS_INs <- Glimma::glimmaMDS(data_for_MDS_filtered_INs_num_bc, group=sampleTable, continuous.color = TRUE)
+```
+
+
+#############################################################################
+#Get MDS coordinates after batch correction with Excitatory Neuron genes to input into Prism
+#############################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction with Oligodendrocyte genes 
+MDS_scores_EOAD_NDC_bc_INs <- glimmaPlot_EOAD_NDC_batchCorrection_MDS_INs$x$data$mdsData
+
+#Write the .csv file with all MDS scores 
+write.csv(MDS_scores_EOAD_NDC_bc_INs, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.INs.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+####################################################################
+#Inhibitory Immature Neurons from Literature and Custom Annotation
+#####################################################################
+
+#Subset inhibitory neuron filtered counts for only immature genes
+```{r}
+#Read the .csv file 
+Immature_genes <- data.table(read.csv('~/Custom_Immature_Neurons.csv'))
+
+#Get the immature inhibitory neuron markers available (DCX and TUBB3)
+Immature_IN_genes <- merge(IN_filtered_counts_v3, Immature_genes,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Immature_IN_genes, '~/filteredCounts_24samples_Immature_INs.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+##########################################################
+#Overlap genes between excitatory and inhibitory neurons
+##########################################################
+
+```{r}
+#Get common gene symbols between excitatory and inhibitory neurons
+commonGenes_ENs_INs <- merge(EN_filtered_counts_v3, IN_filtered_counts_v3, by = "SYMBOL")
+
+#Get unique gene symbols
+commonGenes_ENs_INs_unique <- unique(commonGenes_ENs_INs)
+
+#Write the .csv file
+write.csv(commonGenes_ENs_INs_unique, '~/filteredCounts_24samples_common_ENs_INs.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#########################################################
+Astrocytes from Allen Brain Atlas and Custom Annotation
+#########################################################
+
+#Get set of astrocytes from Allen Brain Atlas and Custom Annotation
+```{r}
+#Read gene symbols for astrocytes manually curated from Allen Brain Atlas and custom annotation
+Astrocyte_genes_ABA_custom <- data.table(read.csv('~/Astrocytes_M1_10x_Custom_Annot_Genes.csv'))
+```
+
+
+#Combine gene symbols from Allen Brain Atlas and Custom Annotation with filtered counts
+```{r}
+#Merge the astrocyte gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Astrocyte_filtered_counts <- merge(Astrocyte_genes_ABA_custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Get distinct values (n = 358 genes)
+Astrocyte_filtered_counts_distinct <- distinct(Astrocyte_filtered_counts)
+
+#Write the .csv file 
+write.csv(Astrocyte_filtered_counts_distinct, '~/filteredCounts_24samples_Astrocytes.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+####################################################################
+#Astrocyte Immature Neurons from Literature and custom annotation
+####################################################################
+
+#Subset astrocyte neuron filtered counts for only immature genes
+```{r}
+#Read the .csv file 
+Immature_genes <- data.table(read.csv('~/Custom_Immature_Neurons.csv'))
+
+#Get the immature astrocyte neuron markers available (NONE)
+Immature_Astrocyte_genes <- merge(Astrocyte_filtered_counts, Immature_genes,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Immature_Astrocyte_genes, '~/filteredCounts_24samples_Immature_Astrocytes.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#########################################
+Microglia Cells from Allen Brain Atlas
+#########################################
+
+#Get set of microglia cells from Allen Brain Atlas 
+```{r}
+#Read gene symbols for microglia manually curated from Allen Brain Atlas
+Microglia_genes_ABA <- data.table(read.csv('~/Microglia_M1_10x_Genes.csv'))
+```
+
+
+#Combine gene symbols from Allen Brain Atlas  with filtered counts
+```{r}
+#Merge the microglia gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Microglia_filtered_counts <- merge(Microglia_genes_ABA, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Get distinct values (n = 140 genes)
+Microglia_filtered_counts_distinct <- distinct(Microglia_filtered_counts)
+
+#Write the .csv file
+write.csv(Microglia_filtered_counts_distinct, '~/filteredCounts_24samples_Microglia.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#############################################
+#Microglia Immature Neurons from Literature
+#############################################
+
+#Subset microglia neuron filtered counts for only immature genes
+```{r}
+#Read the .csv file 
+Immature_genes <- data.table(read.csv('~/Custom_Immature_Neurons.csv'))
+
+#Get the immature microglia neuron markers available (NONE)
+Immature_Microglia_genes <- merge(Microglia_filtered_counts, Immature_genes,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Immature_Microglia_genes, '~/filteredCounts_24samples_Immature_Microglia.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+##############################################################
+Oligodendrocytes from Allen Brain Atlas and Custom Annotation
+##############################################################
+
+#Get set of oligodendrocytes from Allen Brain Atlas and Custom Annotation 
+```{r}
+#Read gene symbols for oligodendrocytes manually curated from Allen Brain Atlas and Custom Annotation
+Oligodendrocytes_genes_ABA_custom <- data.table(read.csv('~/Oligodendrocytes_M1_10x_Custom_Annot_Genes.csv'))
+```
+
+
+#Combine gene symbols from Allen Brain Atlas and Custom Annotation with filtered counts
+```{r}
+#Merge the oligodendrocyte gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Oligodendrocytes_filtered_counts <- merge(Oligodendrocytes_genes_ABA_custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Get distinct values (n = 2,041 genes)
+Oligodendrocytes_filtered_counts_distinct <- distinct(Oligodendrocytes_filtered_counts)
+
+#Write the .csv file 
+write.csv(Oligodendrocytes_filtered_counts_distinct, '~/filteredCounts_24samples_Oligodendrocytes.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#############################################################################
+#Do MDS clustering based on only Oligodendrocytes and batch corrected genes
+#############################################################################
+
+##DO Oligodendrocytes [MDS clustering] here 
+```{r}
+#Subset counts into only batch corrected oligodendrocyte genes
+#Merge two data frames by ID
+#2,058 genes x 24 samples
+Oligodendrocytes_genes_ABA_custom_merge_ALL <- merge(final_counts_filtered_genes_bc, Oligodendrocytes_genes_ABA_custom,by="SYMBOL")
+```
+
+###########################################################################
+#Run MDS with Oligodendrocytes only, filtered counts after batch correction
+###########################################################################
+
+```{r}
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+
+data_for_MDS_filtered_Oligodendrocytes <- Oligodendrocytes_genes_ABA_custom_merge_ALL
+
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_MDS_filtered_Oligodendrocytes_num <- as.data.frame(data_for_MDS_filtered_Oligodendrocytes[,-1], row.names = data_for_MDS_filtered_Oligodendrocytes[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_MDS_filtered_Oligodendrocytes_num_bc <- mutate_all(data_for_MDS_filtered_Oligodendrocytes_num, function(x) as.numeric(as.character(x)))
+
+```
+
+```{r}
+#How to run MDS plotting with batch correction 
+glimmaPlot_EOAD_NDC_batchCorrection_MDS_Oligodendrocytes <- Glimma::glimmaMDS(data_for_MDS_filtered_Oligodendrocytes_num_bc, group=sampleTable, continuous.color = TRUE)
+```
+
+
+#############################################################################
+#Get MDS coordinates after batch correction with custom Progenitor Oligodendrocyte genes to input into Prism
+#############################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction with Oligodendrocyte genes
+MDS_scores_EOAD_NDC_bc_Oligodendrocytes <- glimmaPlot_EOAD_NDC_batchCorrection_MDS_Oligodendrocytes$x$data$mdsData
+
+#Write the .csv file with all MDS scores 
+write.csv(MDS_scores_EOAD_NDC_bc_Oligodendrocytes, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.Oligodendrocytes.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#########################################################################
+#Oligodendrocytes Immature Neurons from Literature and Custom Annotation
+#########################################################################
+
+#Subset oligodendrocytes neuron filtered counts for only immature genes
+```{r}
+#Read the .csv file 
+Immature_genes <- data.table(read.csv('~/Custom_Immature_Neurons.csv'))
+
+#Get the immature oligodendrocytes neuron markers available (NONE)
+Immature_Oligodendrocytes_genes <- merge(Oligodendrocytes_filtered_counts, Immature_genes,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Immature_Oligodendrocytes_genes, '~/filteredCounts_24samples_Immature_Oligodendrocytes.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+####################################################################################
+Oligodendrocyte Precursor Cells, OPCs from Allen Brain Atlas and Custom Annotation
+####################################################################################
+
+#Get set of OPCs from Allen Brain Atlas 
+```{r}
+#Read gene symbols for OPCs manually curated from Allen Brain Atlas
+OPCs_genes_ABA_custom <- data.table(read.csv('~/OPCs_M1_10x_Custom_Annot_Genes.csv'))
+```
+
+
+#Combine gene symbols from Allen Brain Atlas  with filtered counts
+```{r}
+#Merge the OPC gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+OPCs_filtered_counts <- merge(OPCs_genes_ABA_custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Get distinct values (n = 469 genes)
+OPCs_filtered_counts_distinct <- distinct(OPCs_filtered_counts)
+
+#Write the .csv file
+write.csv(OPCs_filtered_counts_distinct, '~/filteredCounts_24samples_OPCs.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#############################################################
+#OPCs Immature Neurons from Literature and Custom Annotation
+#############################################################
+
+#Subset OPCs neuron filtered counts for only immature genes
+```{r}
+#Read the .csv file 
+Immature_genes <- data.table(read.csv('~/Custom_Immature_Neurons.csv'))
+
+#Get the immature OPCs neuron markers available (NONE)
+Immature_OPCs_genes <- merge(OPCs_filtered_counts, Immature_genes,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Immature_OPCs_genes, '~/filteredCounts_24samples_Immature_OPCs.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#########################################
+Progenitor Cells from Custom Annotation
+#########################################
+
+#Get set of Progenitors from Custom Annotation 
+```{r}
+#Read gene symbols for progenitor cells from custom annotation
+#Early + Radial Glia + IPCs + NPCs all added together as progenitor group
+Progenitor_genes_Custom <- data.table(read.csv('~/Custom_Progenitor_Cells.csv'))
+```
+
+
+#Combine gene symbols from Custom Annotation  with filtered counts
+```{r}
+#Merge the progenitor cell gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Progenitors_filtered_counts <- merge(Progenitor_genes_Custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Get distinct values (n = 48 genes)
+Progenitors_filtered_counts_distinct <- distinct(Progenitors_filtered_counts)
+
+#Write the .csv file 
+write.csv(Progenitors_filtered_counts_distinct, '~/filteredCounts_24samples_Progenitors.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+######################################################################################
+#Do MDS clustering based on only progenitor cells only and batch corrected genes
+#######################################################################################
+
+##DO Progenitor Cells [MDS clustering] here 
+```{r}
+#Subset counts into only batch corrected mature neuron genes
+#Merge two data frames by ID
+#52 genes x 24 samples
+Progenitor_cells_custom_merge_ALL <- merge(final_counts_filtered_genes_bc, Progenitor_genes_Custom,by="SYMBOL")
+```
+
+#######################################################################################
+#Run MDS with custom and progenitor cells only, filtered counts after batch correction
+#######################################################################################
+
+
+```{r}
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+
+data_for_MDS_filtered_Progenitor_cells_custom <- Progenitor_cells_custom_merge_ALL
+
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_MDS_filtered_Progenitor_cells_custom <- as.data.frame(data_for_MDS_filtered_Progenitor_cells_custom[,-1], row.names = data_for_MDS_filtered_Progenitor_cells_custom[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_MDS_filtered_Progenitor_cells_custom_num_bc <- mutate_all(data_for_MDS_filtered_Progenitor_cells_custom, function(x) as.numeric(as.character(x)))
+
+```
+
+```{r}
+#How to run MDS plotting with batch correction 
+glimmaPlot_EOAD_NDC_batchCorrection_MDS_Progenitor_cells <- Glimma::glimmaMDS(data_for_MDS_filtered_Progenitor_cells_custom_num_bc,group=sampleTable, continuous.color = TRUE)
+```
+
+
+####################################################################################################
+#Get MDS coordinates after batch correction with custom progenitor cells genes to input into Prism
+####################################################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction with custom progenitor cells genes 
+MDS_scores_EOAD_NDC_bc_Progenitor_cells <- glimmaPlot_EOAD_NDC_batchCorrection_MDS_Progenitor_cells$x$data$mdsData
+
+#Write the .csv file with all MDS scores 
+write.csv(MDS_scores_EOAD_NDC_bc_Progenitor_cells, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.Progenitor_Cells_Custom.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+###############################################
+Progenitor Early Cells from Custom Annotation
+###############################################
+
+#Get set of Progenitor Early cells from Custom Annotation 
+```{r}
+#Read gene symbols for progenitor cells from custom annotation
+Progenitor_Early_genes_Custom <- data.table(read.csv('~/Custom_Cell_Type_Annotation/Custom_Progenitor_Cells_Early.csv'))
+```
+
+
+#Combine gene symbols from Custom Annotation  with filtered counts
+```{r}
+#Merge the progenitor early cell gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Progenitors_Early_filtered_counts <- merge(Progenitor_Early_genes_Custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Write the .csv file 
+write.csv(Progenitors_Early_filtered_counts, '~/filteredCounts_24samples_Progenitors_Early.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#####################################################
+Progenitor Radial Glia Cells from Custom Annotation
+#####################################################
+
+#Get set of Progenitor Radial Glia cells from Custom Annotation 
+```{r}
+#Read gene symbols for progenitor cells from custom annotation
+Progenitor_Radial_Glia_genes_Custom <- data.table(read.csv('~/Custom_Cell_Type_Annotation/Custom_Progenitor_Cells_Radial_Glia.csv'))
+```
+
+
+#Combine gene symbols from Custom Annotation  with filtered counts
+```{r}
+#Merge the progenitor early cell gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Progenitors_Radial_Glia_filtered_counts <- merge(Progenitor_Radial_Glia_genes_Custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Write the .csv file 
+write.csv(Progenitors_Radial_Glia_filtered_counts, '~/filteredCounts_24samples_Progenitors_Radial_Glia.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#############################################
+Progenitor IPC Cells from Custom Annotation
+#############################################
+
+#Get set of Progenitor Radial Glia cells from Custom Annotation 
+```{r}
+#Read gene symbols for progenitor cells from custom annotation
+Progenitor_IPC_genes_Custom <- data.table(read.csv('~/Custom_Cell_Type_Annotation/Custom_Progenitor_Cells_IPC.csv'))
+```
+
+
+#Combine gene symbols from Custom Annotation  with filtered counts
+```{r}
+#Merge the progenitor early cell gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Progenitors_IPC_filtered_counts <- merge(Progenitor_IPC_genes_Custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Progenitors_IPC_filtered_counts, '~/filteredCounts_24samples_Progenitors_IPC.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#############################################
+Progenitor NPC Cells from Custom Annotation
+#############################################
+
+#Get set of Progenitor Radial Glia cells from Custom Annotation 
+```{r}
+#Read gene symbols for progenitor cells from custom annotation
+Progenitor_NPC_genes_Custom <- data.table(read.csv('~/Custom_Cell_Type_Annotation/Custom_Progenitor_Cells_NPC.csv'))
+```
+
+
+#Combine gene symbols from Custom Annotation  with filtered counts
+```{r}
+#Merge the progenitor early cell gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Progenitors_NPC_filtered_counts <- merge(Progenitor_NPC_genes_Custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Write the .csv file 
+write.csv(Progenitors_NPC_filtered_counts, '~/filteredCounts_24samples_Progenitors_NPC.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#############################################################################
+#Do MDS clustering based on only NPCs and batch corrected genes
+#############################################################################
+
+##DO Progenitor NPCs [MDS clustering] here 
+```{r}
+#Subset counts into only batch corrected progenitor NPCs genes
+#Merge two data frames by ID
+#19 genes x 24 samples
+Progenitor_NPC_genes_Custom_merge_ALL <- merge(final_counts_filtered_genes_bc, Progenitor_NPC_genes_Custom,by="SYMBOL")
+```
+
+###########################################################################
+#Run MDS with custom Progenitor NPCs only, filtered counts after batch correction
+###########################################################################
+
+
+```{r}
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+
+data_for_MDS_filtered_Progenitor_NPCs <- Progenitor_NPC_genes_Custom_merge_ALL
+
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_MDS_filtered_Progenitor_NPCs_num <- as.data.frame(data_for_MDS_filtered_Progenitor_NPCs[,-1], row.names = data_for_MDS_filtered_Progenitor_NPCs[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_MDS_filtered_Progenitor_NPCs_num_bc <- mutate_all(data_for_MDS_filtered_Progenitor_NPCs_num, function(x) as.numeric(as.character(x)))
+
+```
+
+```{r}
+#How to run MDS plotting with batch correction 
+glimmaPlot_EOAD_NDC_batchCorrection_MDS_Progenitor_NPCs <- Glimma::glimmaMDS(data_for_MDS_filtered_Progenitor_NPCs_num_bc, group=sampleTable, continuous.color = TRUE)
+```
+
+
+#############################################################################
+#Get MDS coordinates after batch correction with custom Progenitor NPCs genes to input into Prism
+#############################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction with custom Progenitor NPCs genes 
+MDS_scores_EOAD_NDC_bc_Progenitor_NPCs <- glimmaPlot_EOAD_NDC_batchCorrection_MDS_Progenitor_NPCs$x$data$mdsData
+
+#Write the .csv file with all MDS scores 
+write.csv(MDS_scores_EOAD_NDC_bc_Progenitor_NPCs, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.Progenitor_NPCs.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+
+########################################################
+Glial Cells from Allen Brain Atlas and Custom Annotation
+########################################################
+
+#Get set of Glia Cells from Custom Annotation 
+```{r}
+#Read gene symbols for glia cells from Allen Brain Atlas and custom annotation
+#Astrocytes + Microglia + OPCs + Oligodendrocytes added together as glia cell group
+Glia_cells_genes_ABA_custom <- data.table(read.csv('~/Glia_M1_10x_Custom_Annot_Genes.csv'))
+
+#Get unique gene symbols
+Glia_cells_genes_ABA_custom <- unique(Glia_cells_genes_ABA_custom)
+Glia_cells_genes_ABA_custom$X <- NULL
+```
+
+#Combine gene symbols from Custom Annotation  with filtered counts
+```{r}
+#Merge the stem cell gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Glia_cells_filtered_counts <- merge(Glia_cells_genes_ABA_custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Get distinct values (n = 2,242 genes)
+Glia_cells_filtered_counts_distinct <- distinct(Glia_cells_filtered_counts)
+
+#Write the .csv file 
+write.csv(Glia_cells_filtered_counts_distinct, '~/filteredCounts_24samples_Glia_Cells.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+######################################################################################
+#Do MDS clustering based on only glial cells only and batch corrected genes
+#######################################################################################
+
+##DO Glial cells [MDS clustering] here 
+```{r}
+#Subset counts into only batch corrected mature neuron genes
+#Merge two data frames by ID
+#2260 genes x 24 samples
+Glia_cells_custom_ABA_merge_ALL <- merge(final_counts_filtered_genes_bc, Glia_cells_genes_ABA_custom,by="SYMBOL")
+```
+
+#######################################################################################
+#Run MDS with custom and ABA glial cells only, filtered counts after batch correction
+#######################################################################################
+
+
+```{r}
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+
+data_for_MDS_filtered_Glia_cells_custom_ABA <- Glia_cells_custom_ABA_merge_ALL
+
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_MDS_filtered_Glia_cells_custom_ABA <- as.data.frame(data_for_MDS_filtered_Glia_cells_custom_ABA[,-1], row.names = data_for_MDS_filtered_Glia_cells_custom_ABA[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_MDS_filtered_Glia_cells_custom_ABA_num_bc <- mutate_all(data_for_MDS_filtered_Glia_cells_custom_ABA, function(x) as.numeric(as.character(x)))
+
+```
+
+```{r}
+#How to run MDS plotting with batch correction 
+glimmaPlot_EOAD_NDC_batchCorrection_MDS_Glia_cells <- Glimma::glimmaMDS(data_for_MDS_filtered_Glia_cells_custom_ABA_num_bc,group=sampleTable, continuous.color = TRUE)
+```
+
+
+#################################################################################################
+#Get MDS coordinates after batch correction with custom glial cells genes to input into Prism
+#################################################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction with custom glial cells genes 
+MDS_scores_EOAD_NDC_bc_Glia_cells <- glimmaPlot_EOAD_NDC_batchCorrection_MDS_Glia_cells$x$data$mdsData
+
+#Write the .csv file with all MDS scores 
+write.csv(MDS_scores_EOAD_NDC_bc_Glia_cells, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.Glia_Cells_Custom_ABA.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#############################################
+#Glia Immature Neurons from Literature
+#############################################
+
+#Subset microglia neuron filtered counts for only immature genes
+```{r}
+#Read the .csv file 
+Immature_genes <- data.table(read.csv('~/Custom_Cell_Type_Annotation/Custom_Immature_Neurons.csv'))
+
+#Get the immature microglia neuron markers available (NONE)
+Immature_Glia_genes <- merge(Glia_cells_filtered_counts, Immature_genes,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Immature_Glia_genes, '~/filteredCounts_24samples_Immature_Glia_Cells.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+####################################################
+Glycolytic Neurons Cells from Custom Annotation
+#####################################################
+
+#Get set of glycolytic neurons from custom annotation 
+```{r}
+#Read gene symbols for Glycolytic neurons manually curated from Allen Brain Atlas
+#NOTE: expand on this list!! 
+Glycolytic_Neurons_custom <- data.table(read.csv('~/Custom_Cell_Type_Annotation/Custom_Glycolytic_Neurons.csv'))
+
+#Get the unique symbols
+Glycolytic_Neurons_custom <- unique(Glycolytic_Neurons_custom)
+```
+
+#Combine gene symbols from custom annotation with filtered counts
+```{r}
+#Merge the glycolytic neurons gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Glycolytic_Neurons_filtered_counts <- merge(Glycolytic_Neurons_custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Get unique values (n = 98 genes)
+Glycolytic_Neurons_filtered_counts <- distinct(Glycolytic_Neurons_filtered_counts)
+
+#Write the .csv file 
+write.csv(Glycolytic_Neurons_filtered_counts, '~/filteredCounts_24samples_Glycolytic_Neurons.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+###################################################################
+#Glycolytic Immature Neurons from Literature and Custom Annotation
+###################################################################
+
+#Subset glycolytic neuron filtered counts for only immature genes
+```{r}
+#Read the .csv file 
+Immature_genes <- data.table(read.csv('~/Custom_Immature_Neurons.csv'))
+
+#Get the immature Glycolytic_Neuron markers available (NONE)
+Immature_Glycolytic_Neurons_genes <- merge(Glycolytic_Neurons_filtered_counts, Immature_genes,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Immature_Glycolytic_Neurons_genes, '~/filteredCounts_24samples_Immature_Glycolytic_Neurons.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#############################################
+Mature Neurons from Custom Annotation 
+##############################################
+
+#Get set of Mature Neurons from Different Sources 
+```{r}
+#Read gene symbols for mature neurons from custom annotation
+Mature_neurons_genes_custom <- data.table(read.csv('~/Custom_Cell_Type_Annotation/Custom_Mature_Neurons.csv'))
+
+#Get unique gene symbols (n = 9 genes)
+Mature_neurons_genes_custom <- unique(Mature_neurons_genes_custom)
+```
+
+#Combine gene symbols from Mature neuron list with filtered counts
+```{r}
+#Merge the stem cell gene symbols with the filtered counts of neuron samples from the EOAD study
+#Merge the two .csv files 
+Mature_neurons_filtered_counts_v2 <- merge(Mature_neurons_genes_custom, raw_final_counts_filtered_genes_symbols_24samples,by="SYMBOL")
+
+#Write the .csv file
+write.csv(Mature_neurons_filtered_counts_v2, '~/filteredCounts_24samples_Mature_Neurons.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#######################################################################################
+#Do MDS clustering based on only mature neuron only and batch corrected genes
+#######################################################################################
+
+##DO Mature neuron [MDS clustering] here 
+```{r}
+#Subset counts into only batch corrected mature neuron genes
+#Merge two data frames by ID
+#9 genes x 24 samples
+Mature_neuron_custom_merge_ALL <- merge(final_counts_filtered_genes_bc, Mature_neurons_genes_custom,by="SYMBOL")
+```
+
+###########################################################################
+#Run MDS with custom mature neuron only, filtered counts after batch correction
+###########################################################################
+
+
+```{r}
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+
+data_for_MDS_filtered_Mature_neuron_custom <- Mature_neuron_custom_merge_ALL
+
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_MDS_filtered_Mature_neuron_custom_num <- as.data.frame(data_for_MDS_filtered_Mature_neuron_custom[,-1], row.names = data_for_MDS_filtered_Mature_neuron_custom[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_MDS_filtered_Mature_neuron_custom_num_bc <- mutate_all(data_for_MDS_filtered_Mature_neuron_custom_num, function(x) as.numeric(as.character(x)))
+
+```
+
+```{r}
+#How to run MDS plotting with batch correction 
+glimmaPlot_EOAD_NDC_batchCorrection_MDS_Mature_neuron <- Glimma::glimmaMDS(data_for_MDS_filtered_Mature_neuron_custom_num_bc,group=sampleTable, continuous.color = TRUE)
+```
+
+
+#############################################################################
+#Get MDS coordinates after batch correction with custom mature neuron genes to input into Prism
+#############################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction with custom mature neuron genes
+MDS_scores_EOAD_NDC_bc_Mature_neuron <- glimmaPlot_EOAD_NDC_batchCorrection_MDS_Mature_neuron$x$data$mdsData
+
+#Write the .csv file with all MDS scores 
+write.csv(MDS_scores_EOAD_NDC_bc_Mature_neuron, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.Mature_Neurons_Custom.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+########################################################################
+Immature Neurons from Custom Annotation, Literature and Allen Brain Atlas
+########################################################################
+
+#Get set of Immature Neurons from Different Sources 
+```{r}
+#Read the .csv file 
+Immature_genes <- data.table(read.csv('~/Custom_Immature_Neurons.csv'))
+
+#Get the immature neuron markers available 
+Immature_neurons_filtered_counts  <- merge(raw_final_counts_filtered_genes_symbols_24samples, Immature_genes,by="SYMBOL")
+
+#Get distinct values (n = 14 genes)
+Immature_neurons_filtered_counts_distinct <- distinct(Immature_neurons_filtered_counts)
+
+#Write the .csv file
+write.csv(Immature_neurons_filtered_counts_distinct, '~/filteredCounts_24samples_Immature_Neurons.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+#############################################################################
+#Do MDS clustering based on only immature neurons only and batch corrected genes
+#############################################################################
+
+#DO MDS clustering for immature neurons here 
+```{r}
+#Subset counts into only batch corrected immature neuron cell genes
+#Merge two data frames by ID
+#16 genes x 24 samples
+Immature_neurons_merge_ALL <- merge(final_counts_filtered_genes_bc, Immature_genes,by="SYMBOL")
+```
+
+###########################################################################
+#Run MDS with custom immature neurons only, filtered counts after batch correction
+###########################################################################
+
+```{r}
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+
+data_for_MDS_filtered_Immature_Neurons <- Immature_neurons_merge_ALL
+
+#Move the first column as an index column
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+data_for_MDS_filtered_Immature_Neurons_num <- as.data.frame(data_for_MDS_filtered_Immature_Neurons[,-1], row.names = data_for_MDS_filtered_Immature_Neurons[,1])
+
+#Convert entire dataframe to decimals while preserving numbers
+#Source: https://stackoverflow.com/questions/26391921/how-to-convert-entire-dataframe-to-numeric-while-preserving-decimals
+data_for_MDS_filtered_Immature_Neurons_num_bc <- mutate_all(data_for_MDS_filtered_Immature_Neurons_num, function(x) as.numeric(as.character(x)))
+
+```
+
+```{r}
+#How to run MDS plotting with batch correction 
+glimmaPlot_EOAD_NDC_batchCorrection_MDS_Immature_Neurons <- Glimma::glimmaMDS(data_for_MDS_filtered_Immature_Neurons_num_bc,group=sampleTable, continuous.color = TRUE)
+```
+
+
+#############################################################################
+#Get MDS coordinates after batch correction with custom Immature neuron genes to input into Prism
+#############################################################################
+
+```{r}
+#Get MDS scores PER replicate after batch correction with custom Immature neuron genes 
+MDS_scores_EOAD_NDC_bc_Immature_Neurons <- glimmaPlot_EOAD_NDC_batchCorrection_MDS_Immature_Neurons$x$data$mdsData
+
+#Write the .csv file with all MDS scores 
+write.csv(MDS_scores_EOAD_NDC_bc_Immature_Neurons, '~/filteredCounts_MDS_scores_EOAD_NDC_batchCorrection.Immature_Neurons.csv', append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+```
+
+
+#=========================================================================
+
+###################################################################################
+
+#############################################################
+#Heatmap of EOAD and NDC samples based on all filtered, batch corrected genes
+#############################################################
+
+
+```{r}
+#Variable with filtered, normalized and batch corrected counts
+final_counts_filtered_genes_bc
+
+#Convert filtered, normalized and batch corrected counts to z-scores
+
+#Move the first column as index row names
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+final_counts_filtered_genes_bc_df <- as.data.frame(final_counts_filtered_genes_bc[,-1], row.names = final_counts_filtered_genes_bc[,1])
+
+#Calculate the z-scores of the SAMPLE columns
+#Source: https://www.biostars.org/p/451923/
+#Normalize columns (samples), not rows (features), because what you are aiming to find is the features with large changes between the sample groups, and you will kill the magnitude of changes if you normalize by features
+zScores_EOAD_ctrls_bc_ALL <- scale(final_counts_filtered_genes_bc_df , center = TRUE, scale = TRUE)
+
+
+#Write the .csv file here!! 
+write.csv(zScores_EOAD_ctrls_bc_ALL, "~/zScores_EOAD_ctrls_ALL_bc.csv", append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+
+```
+
+```{r}
+#Read .csv file with z-scores from EOAD and control samples
+zScores_EOAD_NDC_ALL_Mean_byPatient <- read.csv("~/zScores_EOAD_ctrls_ALL_bc_Average.csv")
+
+#Rename the columns
+# Rename column where names is "Sepal.Length"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient) == "NDC1_Average"] <- "NDC_EOAD1"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient) == "NDC2_Average"] <- "NDC_EOAD2"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient) == "NDC3_Average"] <- "NDC_EOAD3"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient) == "NDC4_Average"] <- "NDC_EOAD4"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient) == "EOAD1_Average"] <- "EOAD1"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient) == "EOAD2_Average"] <- "EOAD2"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient) == "EOAD3_Average"] <- "EOAD3"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient) == "EOAD4_Average"] <- "EOAD4"
+
+#Move the first column as index row names
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+zScores_EOAD_NDC_ALL_Mean_byPatient <- as.data.frame(zScores_EOAD_NDC_ALL_Mean_byPatient[,-1], row.names = zScores_EOAD_NDC_ALL_Mean_byPatient[,1])
+```
+
+#Create the heatmap 
+```{r}
+#Get the viridis color palette
+viridis.16 <- hcl.colors(16, palette = "viridis", alpha = NULL, rev = TRUE, fixup = TRUE)
+
+#Source: https://statisticsglobe.com/order-rows-columns-heatmap-r
+#Create new dendrograms for row and columns
+hclust_rows_byPatient <- as.dendrogram(hclust(dist(zScores_EOAD_NDC_ALL_Mean_byPatient)))  
+
+# Calculate hclust dendrograms
+hclust_cols_byPatient <- as.dendrogram(hclust(dist(t(zScores_EOAD_NDC_ALL_Mean_byPatient))))
+
+#Draw the heatmap using the Heatmap class (Version 2 from Andrew) 
+#RGB Codes:
+#NDC_EOAD1 - #262626
+#NDC_EOAD2 - #525252
+#NDC_EOAD3 - #8d8d8d
+#NDC_EOAD4 - #c6c6c6
+#EOAD1 - #78b389
+#EOAD2 - #ff0033
+#EOAD3 - #fd8305
+#EOAD4 - #ffc107
+heatmap(as.matrix(zScores_EOAD_NDC_ALL_Mean_byPatient), col = viridis.16, hclustfun = function(x) hclust(x,method="ward.D"), breaks = seq(3,-3,length.out=17), ColSideColors = c("#262626", "#525252", "#8d8d8d", "#c6c6c6", "#78b389", "#ff0033", "#fd8305", "#ffc107"), Rowv = hclust_rows_byPatient, Colv = hclust_cols_byPatient, labRow = FALSE, reorderfun = function(d, w) reorder(d, w), cluster_columns = FALSE)
+```
+
+###############################################################
+#Heatmap of EOAD and NDC samples based on neuron lineage genes
+###############################################################
+
+
+```{r}
+#Variable with filtered, normalized, batch corrected, neuron lineage counts
+neuron_lineage_merge_ALL
+
+#Convert filtered, normalized, batch corrected, neuron lineage counts to z-scores
+
+#Move the first column as index row names
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+final_counts_neuron_lineage_merge_ALL_df <- as.data.frame(neuron_lineage_merge_ALL[,-1], row.names = neuron_lineage_merge_ALL[,1])
+
+#Calculate the z-scores of the SAMPLE columns
+#Source: https://www.biostars.org/p/451923/
+#Normalize columns (samples), not rows (features), because what you are aiming to find is the features with large changes between the sample groups, and you will kill the magnitude of changes if you normalize by features
+zScores_EOAD_ctrls_neuron_lineage_bc_ALL <- scale(final_counts_neuron_lineage_merge_ALL_df , center = TRUE, scale = TRUE)
+
+
+#Write the .csv file here!!
+write.csv(zScores_EOAD_ctrls_neuron_lineage_bc_ALL, "~/zScores_EOAD_ctrls_ALL_bc_NL.csv", append =FALSE, sep ="\t", dec = ".", row.names= TRUE, col.names = TRUE)
+
+```
+
+```{r}
+
+#Read .csv file with z-scores from EOAD and control samples
+zScores_EOAD_NDC_ALL_Mean_byPatient_NL <- read.csv("~/zScores_EOAD_ctrls_ALL_bc_NL_Average.csv")
+
+#Rename the columns
+# Rename column where names is "Sepal.Length"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL) == "NDC1_Average"] <- "NDC_EOAD1"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL) == "NDC2_Average"] <- "NDC_EOAD2"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL) == "NDC3_Average"] <- "NDC_EOAD3"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL) == "NDC4_Average"] <- "NDC_EOAD4"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL) == "EOAD1_Average"] <- "EOAD1"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL) == "EOAD2_Average"] <- "EOAD2"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL) == "EOAD3_Average"] <- "EOAD3"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL) == "EOAD4_Average"] <- "EOAD4"
+
+#Move the first column as index row names
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+zScores_EOAD_NDC_ALL_Mean_byPatient_NL <- as.data.frame(zScores_EOAD_NDC_ALL_Mean_byPatient_NL[,-1], row.names = zScores_EOAD_NDC_ALL_Mean_byPatient_NL[,1])
+```
+
+#Create the heatmap 
+```{r}
+#Get the viridis color palette
+viridis.16 <- hcl.colors(16, palette = "viridis", alpha = NULL, rev = TRUE, fixup = TRUE)
+
+#Source: https://statisticsglobe.com/order-rows-columns-heatmap-r
+#Create new dendrograms for row and columns
+hclust_rows_byPatient_NL <- as.dendrogram(hclust(dist(zScores_EOAD_NDC_ALL_Mean_byPatient_NL)))  
+
+# Calculate hclust dendrograms
+hclust_cols_byPatient_NL <- as.dendrogram(hclust(dist(t(zScores_EOAD_NDC_ALL_Mean_byPatient_NL))))
+
+#Draw the heatmap using the Heatmap class (Version 2 from Andrew) 
+#RGB Codes:
+#NDC_EOAD1 - #262626
+#NDC_EOAD2 - #525252
+#NDC_EOAD3 - #8d8d8d
+#NDC_EOAD4 - #c6c6c6
+#EOAD1 - #78b389
+#EOAD2 - #ff0033
+#EOAD3 - #fd8305
+#EOAD4 - #ffc107
+heatmap(as.matrix(zScores_EOAD_NDC_ALL_Mean_byPatient_NL), col = viridis.16, hclustfun = function(x) hclust(x,method="ward.D"), breaks = seq(3,-3,length.out=17), ColSideColors = c("#262626", "#525252", "#8d8d8d", "#c6c6c6", "#78b389", "#ff0033", "#fd8305", "#ffc107"), Rowv = hclust_rows_byPatient_NL, Colv = hclust_cols_byPatient_NL, labRow = FALSE, reorderfun = function(d, w) reorder(d, w), cluster_columns = FALSE)
+```
+
+############################################################
+#Heatmap of EOAD and NDC samples based on a subset of 
+post-mitotic neuron lineage markers
+############################################################
+
+```{r}
+
+#Read .csv file with subset of post-mitotic marker z-scores from EOAD and control samples
+zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset <- read.csv("~/zScores_EOAD_ctrls_ALL_bc_NL_Average_subset_postMitotic.csv")
+
+#Rename the columns
+# Rename column where names is "Sepal.Length"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset) == "NDC1_Average"] <- "NDC_EOAD1"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset) == "NDC2_Average"] <- "NDC_EOAD2"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset) == "NDC3_Average"] <- "NDC_EOAD3"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset) == "NDC4_Average"] <- "NDC_EOAD4"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset) == "EOAD1_Average"] <- "EOAD1"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset) == "EOAD2_Average"] <- "EOAD2"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset) == "EOAD3_Average"] <- "EOAD3"
+colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset)[colnames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset) == "EOAD4_Average"] <- "EOAD4"
+
+#Move the first column as index row names
+#Source: https://stackoverflow.com/questions/45526629/convert-first-column-in-data-frame-to-row-index
+zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset <- as.data.frame(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset[,-1], row.names = zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset[,1])
+```
+
+#Create the heatmap
+```{r}
+#Get the viridis color palette
+viridis.16 <- hcl.colors(16, palette = "viridis", alpha = NULL, rev = TRUE, fixup = TRUE)
+
+#Source: https://statisticsglobe.com/order-rows-columns-heatmap-r
+#Create new dendrograms for row and columns
+hclust_rows_byPatient_NL_subset <- as.dendrogram(hclust(dist(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset)))  
+
+# Calculate hclust dendrograms
+hclust_cols_byPatient_NL_subset <- as.dendrogram(hclust(dist(t(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset))))
+
+#Draw the labeled heatmap using the Heatmap class (Version 2 from Andrew) 
+#RGB Codes:
+#NDC_EOAD1 - #262626
+#NDC_EOAD2 - #525252
+#NDC_EOAD3 - #8d8d8d
+#NDC_EOAD4 - #c6c6c6
+#EOAD1 - #78b389
+#EOAD2 - #ff0033
+#EOAD3 - #fd8305
+#EOAD4 - #ffc107
+heatmap(as.matrix(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset), col = viridis.16, hclustfun = function(x) hclust(x,method="ward.D"), breaks = seq(3,-3,length.out=17), ColSideColors = c("#262626", "#525252", "#8d8d8d", "#c6c6c6", "#78b389", "#ff0033", "#fd8305", "#ffc107"), Rowv = hclust_rows_byPatient_NL_subset, Colv = hclust_cols_byPatient_NL_subset, labRow = rownames(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset), reorderfun = function(d, w) reorder(d, w), cluster_columns = TRUE)
+```
+
+#Unlabeled heatmap for post-mitotic markers
+```{r}
+heatmap(as.matrix(zScores_EOAD_NDC_ALL_Mean_byPatient_NL_subset), col = viridis.16, hclustfun = function(x) hclust(x,method="ward.D"), breaks = seq(3,-3,length.out=17), ColSideColors = c("#262626", "#525252", "#8d8d8d", "#c6c6c6", "#78b389", "#ff0033", "#fd8305", "#ffc107"), Rowv = hclust_rows_byPatient_NL_subset, Colv = hclust_cols_byPatient_NL_subset, labRow = FALSE, reorderfun = function(d, w) reorder(d, w), cluster_columns = TRUE)
+```
+
+####################
+#Save .RData File 
+####################
+
+#Save RData file in local desktop 
+```{r}
+save.image('~/EOAD_NDC_Counts_24samples_MDS_UMAP_CellTypes.RData')
+```
